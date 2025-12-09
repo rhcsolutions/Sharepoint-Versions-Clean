@@ -526,47 +526,58 @@ foreach ($Site in $TargetSites) {
             $fileSize = $item.FieldValues.File_x0020_Size
             $modified = $item.FieldValues.Modified
             
-            # Progress indicator with file name
-            if ($FileCounter % 10 -eq 0 -or $FileCounter -eq 1) {
-                $percentComplete = [math]::Round(($FileCounter / $TotalFileCount) * 100, 1)
-                Write-Host "        [$FileCounter/$TotalFileCount - $percentComplete%] $fileName" -ForegroundColor DarkGray
-            }
-            
             try {
-                # Delete all versions at once (like web interface)
-                $retryCount = 0
-                $maxRetries = 3
-                $success = $false
-                $versionCount = 0
+                # Get version count before deletion
+                $versions = Get-PnPFileVersion -Url $fileUrl -Connection $UserConn -ErrorAction SilentlyContinue
+                $versionCount = if ($versions) { $versions.Count } else { 0 }
                 
-                while (-not $success -and $retryCount -lt $maxRetries) {
-                    try {
-                        # Use Remove-PnPFileVersion with -All flag to delete all versions in one operation
-                        Remove-PnPFileVersion -Url $fileUrl -All -Force -Connection $UserConn -ErrorAction Stop
-                        $success = $true
-                        $versionCount = 1  # Assume at least 1 version was deleted
-                        
-                        $UserFilesWithVersions++
-                        $TotalVersionsCount++
-                    }
-                    catch {
-                        $errorMsg = $_.Exception.Message
-                        
-                        # Check if it's a "no versions" error
-                        if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*" -or $errorMsg -like "*not found*") {
-                            $success = $true  # Not an error, just no versions
-                            $UserFilesSkipped++
+                # Extract directory path from file URL
+                $filePath = $fileUrl
+                if ($filePath -match '^.*/') {
+                    $directory = $matches[0].TrimEnd('/')
+                } else {
+                    $directory = "/"
+                }
+                
+                # Display file info in requested format: directory\filename - number of versions
+                Write-Host "        $filePath - $versionCount versions" -ForegroundColor $(if ($versionCount -gt 0) { "Cyan" } else { "DarkGray" })
+                
+                # Delete all versions at once (like web interface)
+                if ($versionCount -gt 0) {
+                    $retryCount = 0
+                    $maxRetries = 3
+                    $success = $false
+                    
+                    while (-not $success -and $retryCount -lt $maxRetries) {
+                        try {
+                            # Use Remove-PnPFileVersion with -All flag to delete all versions in one operation
+                            Remove-PnPFileVersion -Url $fileUrl -All -Force -Connection $UserConn -ErrorAction Stop
+                            $success = $true
+                            
+                            $UserFilesWithVersions++
+                            $TotalVersionsCount += $versionCount
                         }
-                        else {
-                            $retryCount++
-                            if ($retryCount -lt $maxRetries) {
-                                Start-Sleep -Milliseconds 500
+                        catch {
+                            $errorMsg = $_.Exception.Message
+                            
+                            # Check if it's a "no versions" error
+                            if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*" -or $errorMsg -like "*not found*") {
+                                $success = $true  # Not an error, just no versions
+                                $UserFilesSkipped++
                             }
                             else {
-                                throw $_
+                                $retryCount++
+                                if ($retryCount -lt $maxRetries) {
+                                    Start-Sleep -Milliseconds 500
+                                }
+                                else {
+                                    throw $_
+                                }
                             }
                         }
                     }
+                } else {
+                    $UserFilesSkipped++
                 }
             }
             catch {
@@ -576,7 +587,7 @@ foreach ($Site in $TargetSites) {
                     $UserFilesSkipped++
                 }
                 else {
-                    Write-Host "        ✗ $fileName - ERROR: $errorMsg" -ForegroundColor Red
+                    Write-Host "        ✗ $filePath - ERROR: $errorMsg" -ForegroundColor Red
                     $ErrorCount++
                 }
             }
