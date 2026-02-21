@@ -49,33 +49,54 @@ Write-Host ""
 Write-Host "[STEP 2] App Registration" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
 
-$AppName = "SharePoint-Cleanup-Tool"
+$AppName  = "SharePoint-Cleanup-Tool"
+$CertPath = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
+$ConfigPath = Join-Path $PSScriptRoot "config.json"
 $ClientId = ""
 $AppObjectId = ""
-$AppIsNew = $false
 
-Write-Host "  Checking if '$AppName' exists in Azure..." -NoNewline
-$ExistingApp = Get-PnPAzureADApp -ApplicationName $AppName -ErrorAction SilentlyContinue
+# Load saved ClientId from config if available
+if (Test-Path $ConfigPath) {
+    try {
+        $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+        $ClientId = $Config.ClientId
+    } catch { $ClientId = "" }
+}
 
-if ($ExistingApp) {
-    Write-Host " ✓ Found!" -ForegroundColor Green
-    $ClientId    = $ExistingApp.AzureAppId
-    $AppObjectId = $ExistingApp.Id
-    Write-Host "  Client ID: $ClientId" -ForegroundColor Cyan
+# Check certificate
+if (Test-Path $CertPath) {
+    Write-Host "  ✓ Certificate found: SharePoint-Cleanup-Tool.pfx" -ForegroundColor Green
 } else {
-    Write-Host " — Not found. Creating..." -ForegroundColor Gray
+    Write-Host "  ⚠ Certificate not found at: $CertPath" -ForegroundColor Yellow
+    Write-Host "    Will fall back to interactive browser login." -ForegroundColor Gray
+}
+
+# Show or ask for ClientId
+if (-not [string]::IsNullOrWhiteSpace($ClientId)) {
+    Write-Host "  Saved Client ID: $ClientId" -ForegroundColor Cyan
+    Write-Host "  [Enter] Use existing app" -ForegroundColor White
+    Write-Host "  [N]     Create a new app registration (with all required permissions)" -ForegroundColor White
+    $Confirm = Read-Host "  Choice"
+    if ($Confirm -eq 'N' -or $Confirm -eq 'n') {
+        $ClientId = ""   # Fall through to create new app below
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($ClientId)) {
+    Write-Host ""
+    Write-Host "  Creating new app '$AppName'..." -ForegroundColor Yellow
     try {
         $AppRegistration = Register-PnPAzureADApp `
             -ApplicationName $AppName `
             -Tenant "$TenantName.onmicrosoft.com" `
             -SharePointDelegatePermissions "AllSites.FullControl" `
             -SharePointApplicationPermissions "Sites.FullControl.All" `
+            -CertificatePath $CertPath `
             -ErrorAction Stop
         $ClientId = $AppRegistration.'AzureAppId/ClientId'
-        $AppIsNew = $true
-        Write-Host "  ✓ Created! Client ID: $ClientId" -ForegroundColor Green
+        Write-Host "  ✓ App created! Client ID: $ClientId" -ForegroundColor Green
         Write-Host ""
-        Write-Host "  ⚠ Granting admin consent..." -ForegroundColor Yellow
+        Write-Host "  ⚠ Grant admin consent now (opening browser)..." -ForegroundColor Yellow
         Start-Process "https://login.microsoftonline.com/$TenantName.onmicrosoft.com/adminconsent?client_id=$ClientId"
         Start-Sleep -Seconds 2
         Write-Host "  Grant consent in the browser, then press any key to continue..." -ForegroundColor Cyan
@@ -83,19 +104,19 @@ if ($ExistingApp) {
     }
     catch {
         Write-Host "  ✗ Failed to create app: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Paste an existing Client ID to continue, or press Ctrl+C to exit." -ForegroundColor Yellow
+        Write-Host "  (Azure Portal → App registrations → $AppName → Application (client) ID)" -ForegroundColor Gray
+        $ClientId = Read-Host "  Client ID"
+        if ([string]::IsNullOrWhiteSpace($ClientId)) {
+            Write-Host "✗ Client ID is required. Exiting." -ForegroundColor Red
+            exit
+        }
     }
 }
 
-if ([string]::IsNullOrWhiteSpace($ClientId)) {
-    Write-Host ""
-    Write-Host "Client ID could not be retrieved automatically." -ForegroundColor Yellow
-    Write-Host "(Azure Portal > App registrations > $AppName > Application (client) ID)" -ForegroundColor Gray
-    $ClientId = Read-Host "Paste Client ID"
-    if ([string]::IsNullOrWhiteSpace($ClientId)) {
-        Write-Host "✗ Client ID is required. Exiting." -ForegroundColor Red
-        exit
-    }
-}
+# Save ClientId for next run
+@{ ClientId = $ClientId } | ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
 Write-Host "✓ App ID: $ClientId" -ForegroundColor Green
 Write-Host ""
 
@@ -133,67 +154,73 @@ $AdminUrl   = "https://$TenantName-admin.sharepoint.com"
 $MySiteHost = "https://$TenantName-my.sharepoint.com"
 
 # ========== CONNECT TO ADMIN CENTER ==========
-Write-Host "[CONNECTION] Sign in with your admin account in the browser..." -ForegroundColor Yellow
-Write-Host "  Account: $AdminEmail" -ForegroundColor Gray
-Write-Host "  URL:     $AdminUrl" -ForegroundColor DarkGray
+Write-Host "[CONNECTION] Connecting to SharePoint Admin Center..." -ForegroundColor Yellow
+Write-Host "  URL: $AdminUrl" -ForegroundColor Gray
+
 try {
-    Connect-PnPOnline -Url $AdminUrl -Interactive -ClientId $ClientId -ErrorAction Stop
+    if (Test-Path $CertPath) {
+        Write-Host "  Using certificate authentication (no browser needed)" -ForegroundColor Gray
+        Connect-PnPOnline `
+            -Url $AdminUrl `
+            -ClientId $ClientId `
+            -Tenant "$TenantName.onmicrosoft.com" `
+            -CertificatePath $CertPath `
+            -ErrorAction Stop
+    } else {
+        Write-Host "  No certificate — opening browser for $AdminEmail" -ForegroundColor Gray
+        Connect-PnPOnline -Url $AdminUrl -Interactive -ClientId $ClientId -ErrorAction Stop
+    }
     Write-Host "✓ Connected!" -ForegroundColor Green
 } catch {
     Write-Host "✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  • Make sure you signed in as $AdminEmail" -ForegroundColor Yellow
-    Write-Host "  • That account needs Global Admin or SharePoint Administrator role" -ForegroundColor Yellow
-    Write-Host "  • Ensure admin consent is granted for the app in Azure Portal" -ForegroundColor Yellow
+    Write-Host "  • Verify the Client ID is correct for app '$AppName'" -ForegroundColor Yellow
+    Write-Host "  • Ensure the certificate is uploaded to the app in Azure Portal" -ForegroundColor Yellow
+    Write-Host "  • Admin consent must be granted for Sites.FullControl.All" -ForegroundColor Yellow
     exit
 }
 
-# ========== UPDATE APP PERMISSIONS (if existing app) ==========
-# Now that we have a valid connection and Graph token, update app permissions
-if (-not $AppIsNew -and -not [string]::IsNullOrWhiteSpace($AppObjectId)) {
-    Write-Host "[PERMISSIONS] Ensuring app has required permissions..." -ForegroundColor Yellow
-    try {
-        $SharePointAppId     = "00000003-0000-0ff1-ce00-000000000000"
-        $AllSitesFullControl = "56680e0d-d2a3-4ae5-9b02-e4a12ea7f3b9"  # Delegated
-        $SitesFullControlAll = "678536fe-1083-478a-9c59-b99265e6b0d3"  # Application
+# ========== ENSURE APP PERMISSIONS ==========
+# Look up the app's Object ID via Graph and ensure Sites.FullControl.All is granted
+Write-Host "[PERMISSIONS] Verifying app permissions..." -ForegroundColor Yellow
+try {
+    $GraphToken = Get-PnPGraphAccessToken
+    $AppInfo = Invoke-RestMethod `
+        -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=appId eq '$ClientId'" `
+        -Headers @{ Authorization = "Bearer $GraphToken" } `
+        -ErrorAction Stop
+    $AppObjectId = $AppInfo.value[0].id
 
-        $Body = @{
-            requiredResourceAccess = @(
-                @{
-                    resourceAppId  = $SharePointAppId
-                    resourceAccess = @(
-                        @{ id = $AllSitesFullControl; type = "Scope" }
-                        @{ id = $SitesFullControlAll;  type = "Role"  }
-                    )
-                }
-            )
-        } | ConvertTo-Json -Depth 5
+    $SharePointAppId     = "00000003-0000-0ff1-ce00-000000000000"
+    $AllSitesFullControl = "56680e0d-d2a3-4ae5-9b02-e4a12ea7f3b9"  # Delegated
+    $SitesFullControlAll = "678536fe-1083-478a-9c59-b99265e6b0d3"  # Application
 
-        Invoke-RestMethod `
-            -Method Patch `
-            -Uri "https://graph.microsoft.com/v1.0/applications/$AppObjectId" `
-            -Headers @{ Authorization = "Bearer $(Get-PnPGraphAccessToken)"; "Content-Type" = "application/json" } `
-            -Body $Body `
-            -ErrorAction Stop
+    $Body = @{
+        requiredResourceAccess = @(
+            @{
+                resourceAppId  = $SharePointAppId
+                resourceAccess = @(
+                    @{ id = $AllSitesFullControl; type = "Scope" }
+                    @{ id = $SitesFullControlAll;  type = "Role"  }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 5
 
-        Write-Host "✓ Permissions updated (Delegated: AllSites.FullControl + Application: Sites.FullControl.All)" -ForegroundColor Green
+    Invoke-RestMethod `
+        -Method Patch `
+        -Uri "https://graph.microsoft.com/v1.0/applications/$AppObjectId" `
+        -Headers @{ Authorization = "Bearer $GraphToken"; "Content-Type" = "application/json" } `
+        -Body $Body `
+        -ErrorAction Stop
 
-        # Re-grant admin consent so updated permissions take effect
-        Write-Host "  Re-granting admin consent for updated permissions..." -ForegroundColor Gray
-        Start-Process "https://login.microsoftonline.com/$TenantName.onmicrosoft.com/adminconsent?client_id=$ClientId"
-        Start-Sleep -Seconds 2
-        Write-Host "  Grant consent in the browser, then press any key to continue..." -ForegroundColor Cyan
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    }
-    catch {
-        Write-Host "⚠ Could not auto-update permissions: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "  Opening Azure Portal API permissions page..." -ForegroundColor Gray
-        Write-Host "  Add: SharePoint → Application permissions → Sites.FullControl.All" -ForegroundColor Gray
-        Write-Host "  Then click 'Grant admin consent for $TenantName'" -ForegroundColor Gray
-        Start-Process "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/CallAnAPI/appId/$ClientId"
-        Write-Host "  Press any key once done..." -ForegroundColor Cyan
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    }
+    Write-Host "✓ Permissions confirmed: AllSites.FullControl (Delegated) + Sites.FullControl.All (Application)" -ForegroundColor Green
+}
+catch {
+    Write-Host "⚠ Could not auto-verify permissions: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "  If discovery fails, manually add in Azure Portal:" -ForegroundColor Gray
+    Write-Host "  App registrations → $AppName → API permissions → SharePoint → Sites.FullControl.All (Application)" -ForegroundColor Gray
+    Write-Host "  Then grant admin consent." -ForegroundColor Gray
 }
 Write-Host ""
 
@@ -207,10 +234,13 @@ try {
     Write-Host "✗ Failed to retrieve tenant sites!" -ForegroundColor Red
     Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  Root cause: Your account does not have the SharePoint Administrator role." -ForegroundColor Yellow
-    Write-Host "  Fix: https://admin.microsoft.com → Users → Active users → click your account" -ForegroundColor Gray
-    Write-Host "       → Manage roles → check 'SharePoint Administrator' → Save" -ForegroundColor Gray
-    Write-Host "  Then wait ~2 minutes and re-run this script." -ForegroundColor Gray
+    Write-Host "  Possible causes:" -ForegroundColor Yellow
+    Write-Host "  1. The app '$AppName' is missing the Sites.FullControl.All Application permission" -ForegroundColor Gray
+    Write-Host "     → Azure Portal → App registrations → $AppName → API permissions" -ForegroundColor Gray
+    Write-Host "     → Add SharePoint → Application → Sites.FullControl.All → Grant admin consent" -ForegroundColor Gray
+    Write-Host "  2. The certificate is not uploaded to the app" -ForegroundColor Gray
+    Write-Host "     → Azure Portal → App registrations → $AppName → Certificates & secrets" -ForegroundColor Gray
+    Write-Host "     → Upload SharePoint-Cleanup-Tool.cer" -ForegroundColor Gray
     exit
 }
 
