@@ -26,7 +26,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "  ║                                                    ║" -ForegroundColor Cyan
-    Write-Host "  ║    SharePoint Version Cleanup Tool  v3             ║" -ForegroundColor White
+    Write-Host "  ║    SharePoint Version Cleanup Tool                  ║" -ForegroundColor White
     Write-Host "  ║                                                    ║" -ForegroundColor Cyan
     Write-Host "  ║    © RHC Solutions  •  rhcsolutions.com            ║" -ForegroundColor DarkCyan
     Write-Host "  ║    Telegram: t.me/rhcsolutions                     ║" -ForegroundColor DarkCyan
