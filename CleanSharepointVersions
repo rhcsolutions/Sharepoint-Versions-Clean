@@ -14,225 +14,285 @@
 
 # --- SETUP BANNER ---
 Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "        SharePoint Version Cleanup Tool v3                " -ForegroundColor Cyan
+Write-Host "      SharePoint Version Cleanup Tool - Enhanced          " -ForegroundColor Cyan
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ========== STEP 1: ADMIN ACCOUNT ==========
-Write-Host "[STEP 1] Your SharePoint Administrator Account" -ForegroundColor Yellow
+# ========== STEP 1: TENANT NAME ==========
+Write-Host "[STEP 1] Tenant Configuration" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "Enter the admin account you will sign in with." -ForegroundColor White
-Write-Host "  • Must have the 'SharePoint Administrator' role" -ForegroundColor Gray
-Write-Host "  • Will be used to access each target OneDrive" -ForegroundColor Gray
-Write-Host ""
-$AdminEmail = Read-Host "Admin account (e.g. admin@contoso.onmicrosoft.com)"
-if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
-    Write-Host "✗ Admin account is required. Exiting." -ForegroundColor Red
-    exit
+$TenantName = Read-Host "Enter your tenant name (e.g., 'contoso' from contoso.onmicrosoft.com)"
+if ([string]::IsNullOrWhiteSpace($TenantName)) { 
+    Write-Host "✗ Tenant name is required. Exiting." -ForegroundColor Red
+    exit 
 }
-
-# Extract tenant name from email
-if ($AdminEmail -match '@(.+?)\.onmicrosoft\.com') {
-    $TenantName = $matches[1]
-} elseif ($AdminEmail -match '@(.+?)\.') {
-    $TenantName = $matches[1]
-} else {
-    Write-Host "✗ Could not extract tenant name from email. Exiting." -ForegroundColor Red
-    exit
-}
-
-Write-Host "✓ Admin account:  $AdminEmail" -ForegroundColor Green
-Write-Host "✓ Tenant:         $TenantName.onmicrosoft.com" -ForegroundColor Green
+Write-Host "✓ Tenant: $TenantName.onmicrosoft.com" -ForegroundColor Green
 Write-Host ""
 
 # ========== STEP 2: APP REGISTRATION ==========
-Write-Host "[STEP 2] App Registration" -ForegroundColor Yellow
+Write-Host "[STEP 2] Azure AD App Registration" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
 
 $AppName = "SharePoint-Cleanup-Tool"
 $ClientId = ""
-$AppObjectId = ""
-$AppIsNew = $false
+$AppFound = $false
 
-Write-Host "  Checking if '$AppName' exists in Azure..." -NoNewline
-$ExistingApp = Get-PnPAzureADApp -ApplicationName $AppName -ErrorAction SilentlyContinue
+Write-Host "Checking for existing app registration..." -ForegroundColor Gray
+Write-Host ""
 
-if ($ExistingApp) {
-    Write-Host " ✓ Found!" -ForegroundColor Green
-    $ClientId    = $ExistingApp.AzureAppId
-    $AppObjectId = $ExistingApp.Id
+Write-Host "  Searching for existing app: '$AppName'..." -NoNewline
+
+try {
+    # Try to create the app - if it exists, catch the error and retrieve it
+    $AppRegistration = Register-PnPAzureADApp `
+        -ApplicationName $AppName `
+        -Tenant "$TenantName.onmicrosoft.com" `
+        -SharePointDelegatePermissions "AllSites.FullControl" `
+        -ErrorAction Stop
+    
+    # If we get here, app was created successfully
+    $ClientId = $AppRegistration.'AzureAppId/ClientId'
+    Write-Host " ✓ Created!" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Green
+    Write-Host "  ✓ App Created Successfully!" -ForegroundColor Green
+    Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Application Name: $AppName" -ForegroundColor White
     Write-Host "  Client ID: $ClientId" -ForegroundColor Cyan
-} else {
-    Write-Host " — Not found. Creating..." -ForegroundColor Gray
-    try {
-        $AppRegistration = Register-PnPAzureADApp `
-            -ApplicationName $AppName `
-            -Tenant "$TenantName.onmicrosoft.com" `
-            -SharePointDelegatePermissions "AllSites.FullControl" `
-            -SharePointApplicationPermissions "Sites.FullControl.All" `
-            -ErrorAction Stop
-        $ClientId = $AppRegistration.'AzureAppId/ClientId'
-        $AppIsNew = $true
-        Write-Host "  ✓ Created! Client ID: $ClientId" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ⚠ IMPORTANT: Grant Admin Consent" -ForegroundColor Yellow
+    Write-Host "  Opening consent page in your browser..." -ForegroundColor Gray
+    Write-Host ""
+    
+    # Open admin consent URL
+    $ConsentUrl = "https://login.microsoftonline.com/$TenantName.onmicrosoft.com/adminconsent?client_id=$ClientId"
+    Start-Process $ConsentUrl
+    Start-Sleep -Seconds 2
+    
+    Write-Host "  After granting consent, press any key to continue..." -ForegroundColor Cyan
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+catch {
+    $errorMsg = $_.Exception.Message
+    
+    # Check if app already exists
+    if ($errorMsg -like "*already exists*") {
+        Write-Host " ✓ Found!" -ForegroundColor Green
         Write-Host ""
-        Write-Host "  ⚠ Granting admin consent..." -ForegroundColor Yellow
-        Start-Process "https://login.microsoftonline.com/$TenantName.onmicrosoft.com/adminconsent?client_id=$ClientId"
-        Start-Sleep -Seconds 2
-        Write-Host "  Grant consent in the browser, then press any key to continue..." -ForegroundColor Cyan
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        
+        # Try to retrieve the existing app's Client ID using multiple methods
+        Write-Host "  Retrieving app details..." -ForegroundColor Gray
+        
+        try {
+            # Method 1: Try Get-PnPAzureADApp directly
+            $ExistingApp = Get-PnPAzureADApp -ApplicationName $AppName -ErrorAction SilentlyContinue
+            
+            if ($ExistingApp -and -not [string]::IsNullOrWhiteSpace($ExistingApp.AzureAppId)) {
+                $ClientId = $ExistingApp.AzureAppId
+                Write-Host ""
+                Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Cyan
+                Write-Host "  ✓ Existing App Found!" -ForegroundColor Cyan
+                Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Cyan
+                Write-Host ""
+                Write-Host "  Application Name: $AppName" -ForegroundColor White
+                Write-Host "  Client ID: $ClientId" -ForegroundColor Cyan
+                Write-Host ""
+                Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Cyan
+                Write-Host ""
+                Write-Host "  ⚠ NOTE: Ensure admin consent has been granted" -ForegroundColor Yellow
+                Write-Host "  in Azure Portal for this application." -ForegroundColor Gray
+                Write-Host ""
+            }
+            else {
+                throw "Could not retrieve app ID"
+            }
+        }
+        catch {
+            Write-Host " ⚠ Could not retrieve app ID automatically" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Yellow
+            Write-Host "  OPENING AZURE PORTAL..." -ForegroundColor Yellow
+            Write-Host "  ══════════════════════════════════════════════════════" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  Opening App Registrations page in your browser..." -ForegroundColor Gray
+            Write-Host "  Please find '$AppName' and copy the Client ID" -ForegroundColor Gray
+            Write-Host ""
+            
+            # Open Azure Portal to App Registrations
+            $AzurePortalUrl = "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+            Start-Process $AzurePortalUrl
+            Start-Sleep -Seconds 3
+            
+            Write-Host "  Press any key once you have copied the Client ID..." -ForegroundColor Cyan
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
     }
-    catch {
-        Write-Host "  ✗ Failed to create app: $($_.Exception.Message)" -ForegroundColor Red
+    else {
+        Write-Host " ✗ Failed" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Error: $errorMsg" -ForegroundColor Red
     }
 }
 
+# Prompt user for Client ID if not obtained automatically
 if ([string]::IsNullOrWhiteSpace($ClientId)) {
-    Write-Host ""
-    Write-Host "Client ID could not be retrieved automatically." -ForegroundColor Yellow
-    Write-Host "(Azure Portal > App registrations > $AppName > Application (client) ID)" -ForegroundColor Gray
-    $ClientId = Read-Host "Paste Client ID"
+    Write-Host "Enter your Application (Client) ID:" -ForegroundColor Yellow
+    Write-Host "(This is found in Azure Portal > App registrations > Your app > Application ID)" -ForegroundColor Gray
+    $ClientId = Read-Host "Client ID"
+    
     if ([string]::IsNullOrWhiteSpace($ClientId)) {
+        Write-Host ""
         Write-Host "✗ Client ID is required. Exiting." -ForegroundColor Red
         exit
     }
 }
-Write-Host "✓ App ID: $ClientId" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "✓ App Configuration Complete" -ForegroundColor Green
+Write-Host "  Using Client ID: $ClientId" -ForegroundColor Cyan
+Write-Host "  Make sure admin consent has been granted in Azure Portal" -ForegroundColor Gray
 Write-Host ""
 
-# ========== DEFAULTS ==========
-$VerboseLogging   = $true   # Always verbose
-$RemoveAccessAfter = $false  # Keep admin access after cleanup
-
-# ========== STEP 3: TARGET USERS ==========
-Write-Host "[STEP 3] Target Users (whose OneDrive versions will be deleted)" -ForegroundColor Yellow
+# ========== STEP 3: ADMIN EMAIL ==========
+Write-Host "[STEP 3] Your SharePoint Administrator Account" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "  [A] ALL users in the tenant" -ForegroundColor White
-Write-Host "  [S] SPECIFIC user(s) — you will pick from a list" -ForegroundColor White
+Write-Host "This is YOUR admin account — the account you will sign in with." -ForegroundColor White
+Write-Host "Requirements:" -ForegroundColor Gray
+Write-Host "  • Must have the 'SharePoint Administrator' role in this tenant" -ForegroundColor Gray
+Write-Host "  • Will be temporarily added as site owner on each target OneDrive" -ForegroundColor Gray
+Write-Host "  • This is NOT the user whose files are being cleaned" -ForegroundColor Gray
+Write-Host ""
+$AdminEmail = Read-Host "Enter your admin email (e.g. admin@$TenantName.onmicrosoft.com)"
+if ([string]::IsNullOrWhiteSpace($AdminEmail)) { 
+    Write-Host "✗ Admin email is required. Exiting." -ForegroundColor Red
+    exit 
+}
+Write-Host "✓ Admin account: $AdminEmail" -ForegroundColor Green
+Write-Host ""
+
+# ========== STEP 4: USER SELECTION PREFERENCE ==========
+Write-Host "[STEP 4] Target Users (whose OneDrive versions will be deleted)" -ForegroundColor Yellow
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "Which users' OneDrive version history should be cleaned up?" -ForegroundColor White
+Write-Host "(These are the END USERS whose files are being processed, NOT your admin account)" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  [A] ALL users in the tenant" -ForegroundColor Green
+Write-Host "  [S] SPECIFIC user(s) only — you will pick from a list" -ForegroundColor Yellow
 Write-Host ""
 $ScopeChoice = Read-Host "Choice (A/S)"
+Write-Host ""
+
+# ========== STEP 5: LOGGING LEVEL ==========
+Write-Host "[STEP 5] Logging Verbosity" -ForegroundColor Yellow
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "How detailed should the output be?" -ForegroundColor White
+Write-Host ""
+Write-Host "  [V] VERBOSE - Show every file with details" -ForegroundColor Cyan
+Write-Host "  [N] NORMAL  - Show summary only" -ForegroundColor Gray
+Write-Host ""
+$VerboseChoice = Read-Host "Choice (V/N)"
+$VerboseLogging = ($VerboseChoice -eq "V")
+Write-Host ""
+
+# ========== STEP 6: ACCESS CLEANUP ==========
+Write-Host "[STEP 6] Remove Admin Access After Cleanup?" -ForegroundColor Yellow
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "Remove admin access after processing?" -ForegroundColor White
+Write-Host "(Recommended for security - removes your temporary access rights)" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  [Y] Yes - Remove my access after cleanup" -ForegroundColor Green
+Write-Host "  [N] No  - Keep my access" -ForegroundColor Yellow
+Write-Host ""
+$RemoveAccess = Read-Host "Choice (Y/N)"
+$RemoveAccessAfter = ($RemoveAccess -eq "Y")
 Write-Host ""
 
 # ========== CONFIGURATION SUMMARY ==========
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "                CONFIGURATION SUMMARY                     " -ForegroundColor Cyan
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Tenant:         $TenantName.onmicrosoft.com" -ForegroundColor White
-Write-Host "  Admin account:  $AdminEmail" -ForegroundColor Cyan
-Write-Host "  App ID:         $ClientId" -ForegroundColor White
-Write-Host "  Target users:   $(if ($ScopeChoice -eq 'A') { 'ALL users in tenant' } else { 'SPECIFIC users (selected after discovery)' })" -ForegroundColor Green
-Write-Host "  Logging:        VERBOSE (default)" -ForegroundColor White
-Write-Host "  Remove access:  NO — admin stays as site owner (default)" -ForegroundColor White
+Write-Host "Tenant:             $TenantName.onmicrosoft.com" -ForegroundColor White
+Write-Host "Admin account:      $AdminEmail  ← signs in, grants access" -ForegroundColor Cyan
+Write-Host "Target users:       $(if ($ScopeChoice -eq 'A') { 'ALL users in tenant' } else { 'SPECIFIC users (selected next)' })  ← whose files are cleaned" -ForegroundColor Yellow
+Write-Host "App ID:             $ClientId" -ForegroundColor White
+Write-Host "Logging:            $(if ($VerboseLogging) { 'VERBOSE' } else { 'NORMAL' })" -ForegroundColor White
+Write-Host "Remove Access:      $(if ($RemoveAccessAfter) { 'YES — admin removed from sites after cleanup' } else { 'NO — admin stays as site owner' })" -ForegroundColor White
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Press any key to connect and start discovery, or Ctrl+C to cancel..." -ForegroundColor Yellow
+Write-Host "Press any key to continue or Ctrl+C to cancel..." -ForegroundColor Yellow
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 Write-Host ""
 
 # ========== BUILD URLS ==========
-$AdminUrl   = "https://$TenantName-admin.sharepoint.com"
+$AdminUrl = "https://$TenantName-admin.sharepoint.com"
 $MySiteHost = "https://$TenantName-my.sharepoint.com"
 
 # ========== CONNECT TO ADMIN CENTER ==========
-Write-Host "[CONNECTION] Sign in with your admin account in the browser..." -ForegroundColor Yellow
-Write-Host "  Account: $AdminEmail" -ForegroundColor Gray
-Write-Host "  URL:     $AdminUrl" -ForegroundColor DarkGray
+Write-Host "[CONNECTION] Sign in with your ADMIN account" -ForegroundColor Yellow
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "A browser window will open. Sign in as: $AdminEmail" -ForegroundColor White
+Write-Host "(This account must have the SharePoint Administrator role)" -ForegroundColor Gray
+Write-Host "URL: $AdminUrl" -ForegroundColor DarkGray
 try {
     Connect-PnPOnline -Url $AdminUrl -Interactive -ClientId $ClientId -ErrorAction Stop
-    Write-Host "✓ Connected!" -ForegroundColor Green
+    Write-Host "✓ Connected as admin!" -ForegroundColor Green
 } catch {
-    Write-Host "✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "✗ Connection failed!" -ForegroundColor Red
+    Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  • Make sure you signed in as $AdminEmail" -ForegroundColor Yellow
-    Write-Host "  • That account needs Global Admin or SharePoint Administrator role" -ForegroundColor Yellow
-    Write-Host "  • Ensure admin consent is granted for the app in Azure Portal" -ForegroundColor Yellow
+    Write-Host "Common issues:" -ForegroundColor Yellow
+    Write-Host "  • Make sure you signed in as $AdminEmail" -ForegroundColor Gray
+    Write-Host "  • That account must have the SharePoint Administrator role" -ForegroundColor Gray
+    Write-Host "  • Ensure admin consent is granted for the app in Azure Portal" -ForegroundColor Gray
     exit
-}
-
-# ========== UPDATE APP PERMISSIONS (if existing app) ==========
-# Now that we have a valid connection and Graph token, update app permissions
-if (-not $AppIsNew -and -not [string]::IsNullOrWhiteSpace($AppObjectId)) {
-    Write-Host "[PERMISSIONS] Ensuring app has required permissions..." -ForegroundColor Yellow
-    try {
-        $SharePointAppId     = "00000003-0000-0ff1-ce00-000000000000"
-        $AllSitesFullControl = "56680e0d-d2a3-4ae5-9b02-e4a12ea7f3b9"  # Delegated
-        $SitesFullControlAll = "678536fe-1083-478a-9c59-b99265e6b0d3"  # Application
-
-        $Body = @{
-            requiredResourceAccess = @(
-                @{
-                    resourceAppId  = $SharePointAppId
-                    resourceAccess = @(
-                        @{ id = $AllSitesFullControl; type = "Scope" }
-                        @{ id = $SitesFullControlAll;  type = "Role"  }
-                    )
-                }
-            )
-        } | ConvertTo-Json -Depth 5
-
-        Invoke-RestMethod `
-            -Method Patch `
-            -Uri "https://graph.microsoft.com/v1.0/applications/$AppObjectId" `
-            -Headers @{ Authorization = "Bearer $(Get-PnPGraphAccessToken)"; "Content-Type" = "application/json" } `
-            -Body $Body `
-            -ErrorAction Stop
-
-        Write-Host "✓ Permissions updated (Delegated: AllSites.FullControl + Application: Sites.FullControl.All)" -ForegroundColor Green
-
-        # Re-grant admin consent so updated permissions take effect
-        Write-Host "  Re-granting admin consent for updated permissions..." -ForegroundColor Gray
-        Start-Process "https://login.microsoftonline.com/$TenantName.onmicrosoft.com/adminconsent?client_id=$ClientId"
-        Start-Sleep -Seconds 2
-        Write-Host "  Grant consent in the browser, then press any key to continue..." -ForegroundColor Cyan
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    }
-    catch {
-        Write-Host "⚠ Could not auto-update permissions: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "  Opening Azure Portal API permissions page..." -ForegroundColor Gray
-        Write-Host "  Add: SharePoint → Application permissions → Sites.FullControl.All" -ForegroundColor Gray
-        Write-Host "  Then click 'Grant admin consent for $TenantName'" -ForegroundColor Gray
-        Start-Process "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/CallAnAPI/appId/$ClientId"
-        Write-Host "  Press any key once done..." -ForegroundColor Cyan
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    }
 }
 Write-Host ""
 
 # ========== RETRIEVE SharePoint SITES ==========
-Write-Host "[DISCOVERY] Scanning for OneDrive sites..." -ForegroundColor Yellow
+Write-Host "[DISCOVERY] Scanning for SharePoint sites..." -ForegroundColor Yellow
 Write-Host "(This may take a few minutes depending on tenant size)" -ForegroundColor Gray
 
+# Get all tenant sites (both OneDrive and SharePoint)
 try {
     $AllSites = Get-PnPTenantSite -IncludeOneDriveSites -ErrorAction Stop
 } catch {
     Write-Host "✗ Failed to retrieve tenant sites!" -ForegroundColor Red
     Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host ""
+    Write-Host "" 
     Write-Host "  Root cause: Your account does not have the SharePoint Administrator role." -ForegroundColor Yellow
-    Write-Host "  Fix: https://admin.microsoft.com → Users → Active users → click your account" -ForegroundColor Gray
+    Write-Host "  Fix: Go to https://admin.microsoft.com" -ForegroundColor Gray
+    Write-Host "       → Users → Active users → click your account" -ForegroundColor Gray
     Write-Host "       → Manage roles → check 'SharePoint Administrator' → Save" -ForegroundColor Gray
     Write-Host "  Then wait ~2 minutes and re-run this script." -ForegroundColor Gray
     exit
 }
 
+# Filter to get OneDrive sites (personal sites)
 $SharePointSites = $AllSites | Where-Object { $_.Url -like "$MySiteHost/personal/*" }
+
 $Count = $SharePointSites.Count
 Write-Host "✓ Found $Count OneDrive site(s)" -ForegroundColor Green
 
 if ($Count -eq 0) {
     Write-Host "✗ No OneDrive sites found." -ForegroundColor Red
-    Write-Host "  Retrieved $($AllSites.Count) total site(s) but none matched: $MySiteHost/personal/*" -ForegroundColor Yellow
+    Write-Host "  Retrieved $($AllSites.Count) total site(s) but none matched the OneDrive personal URL pattern." -ForegroundColor Yellow
+    Write-Host "  Expected pattern: $MySiteHost/personal/*" -ForegroundColor Gray
     exit
 }
 Write-Host ""
 
 # ========== USER SELECTION ==========
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "   TARGET USERS — OneDrive owners found in tenant ($Count)  " -ForegroundColor Cyan
+Write-Host "         TARGET USERS — OneDrive owners ($Count found)         " -ForegroundColor Cyan
+Write-Host "  (These are end users whose version history will be deleted)  " -ForegroundColor DarkGray
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 $i = 0
 foreach ($Site in $SharePointSites) {
     $i++
-    Write-Host "  [$i] $($Site.Owner)" -ForegroundColor Green
+    Write-Host "  [$i] $($Site.Owner)" -ForegroundColor Gray
 }
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""

@@ -266,6 +266,6 @@ End
 
 ---
 
-**Last Updated:** December 2024  
+**Last Updated:** December 2025  
 **Script Version:** 1.0  
 **Status:** Production Ready
