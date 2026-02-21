@@ -1,68 +1,106 @@
 <#
 .SYNOPSIS
-    SharePoint Version Cleanup Tool - Streamlined Setup
+    SharePoint Version Cleanup Tool
 
 .DESCRIPTION
-    Automated setup with app registration guidance and intelligent flow.
-    This script helps clean up version history from SharePoint Online/SharePoint files.
+    Bulk-deletes file version history from OneDrive personal sites across a Microsoft 365 tenant.
+    Supports certificate authentication, saved config, and automatic app permission management.
 
 .NOTES
-    Requires: PnP PowerShell module
-    Author: SharePoint Admin
-    Updated: December 2024
+    Requires: PnP PowerShell module (v3.x)
+    Author:   RHC Solutions
+    Web:      rhcsolutions.com
+    Telegram: t.me/rhcsolutions
+    Updated:  2026
 #>
 
-# --- SETUP BANNER ---
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "        SharePoint Version Cleanup Tool v3                " -ForegroundColor Cyan
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host ""
-
-# ========== STEP 1: ADMIN ACCOUNT ==========
-Write-Host "[STEP 1] Your SharePoint Administrator Account" -ForegroundColor Yellow
-Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "Enter the admin account you will sign in with." -ForegroundColor White
-Write-Host "  • Must have the 'SharePoint Administrator' role" -ForegroundColor Gray
-Write-Host "  • Will be used to access each target OneDrive" -ForegroundColor Gray
-Write-Host ""
-$AdminEmail = Read-Host "Admin account (e.g. admin@contoso.onmicrosoft.com)"
-if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
-    Write-Host "✗ Admin account is required. Exiting." -ForegroundColor Red
-    exit
+# --- STARTUP ANIMATION + BANNER ---
+function Show-Banner {
+    $spinner = @('|','/','—','\')
+    for ($i = 0; $i -lt 16; $i++) {
+        Write-Host "`r  $($spinner[$i % 4])  Initializing..." -NoNewline -ForegroundColor DarkCyan
+        Start-Sleep -Milliseconds 60
+    }
+    Write-Host "`r                         " -NoNewline
+    Write-Host ""
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "  ║                                                    ║" -ForegroundColor Cyan
+    Write-Host "  ║    SharePoint Version Cleanup Tool  v3             ║" -ForegroundColor White
+    Write-Host "  ║                                                    ║" -ForegroundColor Cyan
+    Write-Host "  ║    © RHC Solutions  •  rhcsolutions.com            ║" -ForegroundColor DarkCyan
+    Write-Host "  ║    Telegram: t.me/rhcsolutions                     ║" -ForegroundColor DarkCyan
+    Write-Host "  ║                                                    ║" -ForegroundColor Cyan
+    Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
 }
+Show-Banner
 
-# Extract tenant name from email
-if ($AdminEmail -match '@(.+?)\.onmicrosoft\.com') {
-    $TenantName = $matches[1]
-} elseif ($AdminEmail -match '@(.+?)\.') {
-    $TenantName = $matches[1]
-} else {
-    Write-Host "✗ Could not extract tenant name from email. Exiting." -ForegroundColor Red
-    exit
-}
-
-Write-Host "✓ Admin account:  $AdminEmail" -ForegroundColor Green
-Write-Host "✓ Tenant:         $TenantName.onmicrosoft.com" -ForegroundColor Green
-Write-Host ""
-
-# ========== STEP 2: APP REGISTRATION ==========
-Write-Host "[STEP 2] App Registration" -ForegroundColor Yellow
-Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-
-$AppName  = "SharePoint-Cleanup-Tool"
-$CertPath = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
+# ========== LOAD SAVED CONFIG ==========
+$AppName    = "SharePoint-Cleanup-Tool"
+$CertPath   = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
 $ConfigPath = Join-Path $PSScriptRoot "config.json"
-$ClientId = ""
+$AdminEmail  = ""
+$TenantName  = ""
+$ClientId    = ""
 $AppObjectId = ""
 
-# Load saved ClientId from config if available
 if (Test-Path $ConfigPath) {
     try {
-        $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-        $ClientId = $Config.ClientId
-    } catch { $ClientId = "" }
+        $Config     = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+        $AdminEmail = $Config.AdminEmail
+        $TenantName = $Config.TenantName
+        $ClientId   = $Config.ClientId
+    } catch {}
 }
 
+# ========== SAVED SETTINGS SHORTCUT ==========
+if (-not [string]::IsNullOrWhiteSpace($AdminEmail) -and
+    -not [string]::IsNullOrWhiteSpace($TenantName) -and
+    -not [string]::IsNullOrWhiteSpace($ClientId)) {
+
+    Write-Host "  Saved settings found:" -ForegroundColor Cyan
+    Write-Host "    Admin:    $AdminEmail" -ForegroundColor White
+    Write-Host "    Tenant:   $TenantName.onmicrosoft.com" -ForegroundColor White
+    Write-Host "    App ID:   $ClientId" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [Enter] Use saved settings" -ForegroundColor White
+    Write-Host "  [N]     Enter new settings (different tenant / new app)" -ForegroundColor White
+    $SavedChoice = Read-Host "  Choice"
+    if ($SavedChoice -eq 'N' -or $SavedChoice -eq 'n') {
+        $AdminEmail = ""; $TenantName = ""; $ClientId = ""
+    }
+    Write-Host ""
+}
+
+# ========== STEP 1: ADMIN ACCOUNT ==========
+if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
+    Write-Host "[STEP 1] Your SharePoint Administrator Account" -ForegroundColor Yellow
+    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  • Must have the 'SharePoint Administrator' role" -ForegroundColor Gray
+    Write-Host ""
+    $AdminEmail = Read-Host "Admin account (e.g. admin@contoso.onmicrosoft.com)"
+    if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
+        Write-Host "✗ Admin account is required. Exiting." -ForegroundColor Red
+        exit
+    }
+
+    # Extract tenant name from email
+    if ($AdminEmail -match '@(.+?)\.onmicrosoft\.com') {
+        $TenantName = $matches[1]
+    } elseif ($AdminEmail -match '@(.+?)\.') {
+        $TenantName = $matches[1]
+    } else {
+        Write-Host "✗ Could not extract tenant name from email. Exiting." -ForegroundColor Red
+        exit
+    }
+
+    Write-Host "✓ Admin account:  $AdminEmail" -ForegroundColor Green
+    Write-Host "✓ Tenant:         $TenantName.onmicrosoft.com" -ForegroundColor Green
+    Write-Host ""
+}
+
+# ========== STEP 2: APP REGISTRATION ==========
 # Check certificate
 if (Test-Path $CertPath) {
     Write-Host "  ✓ Certificate found: SharePoint-Cleanup-Tool.pfx" -ForegroundColor Green
@@ -71,15 +109,11 @@ if (Test-Path $CertPath) {
     Write-Host "    Will fall back to interactive browser login." -ForegroundColor Gray
 }
 
-# Show or ask for ClientId
 if (-not [string]::IsNullOrWhiteSpace($ClientId)) {
-    Write-Host "  Saved Client ID: $ClientId" -ForegroundColor Cyan
-    Write-Host "  [Enter] Use existing app" -ForegroundColor White
-    Write-Host "  [N]     Create a new app registration (with all required permissions)" -ForegroundColor White
-    $Confirm = Read-Host "  Choice"
-    if ($Confirm -eq 'N' -or $Confirm -eq 'n') {
-        $ClientId = ""   # Fall through to create new app below
-    }
+    Write-Host "  ✓ App ID: $ClientId" -ForegroundColor Cyan
+    Write-Host "  [Enter] Use existing app   [N] Create new app" -ForegroundColor White
+    $AppChoice = Read-Host "  Choice"
+    if ($AppChoice -eq 'N' -or $AppChoice -eq 'n') { $ClientId = "" }
 }
 
 if ([string]::IsNullOrWhiteSpace($ClientId)) {
@@ -115,8 +149,9 @@ if ([string]::IsNullOrWhiteSpace($ClientId)) {
     }
 }
 
-# Save ClientId for next run
-@{ ClientId = $ClientId } | ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
+# Save all settings for next run
+@{ AdminEmail = $AdminEmail; TenantName = $TenantName; ClientId = $ClientId } |
+    ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
 Write-Host "✓ App ID: $ClientId" -ForegroundColor Green
 Write-Host ""
 
@@ -501,19 +536,30 @@ foreach ($Site in $TargetSites) {
         
         Write-Host "        Processing $TotalFileCount file(s) - Deleting all versions at once..." -ForegroundColor Cyan
         Write-Host ""
-        
+
         foreach ($item in $AllFiles) {
             $FileCounter++
             $fileName = $item.FieldValues.FileLeafRef
             $fileUrl = $item.FieldValues.FileRef
             $fileSize = $item.FieldValues.File_x0020_Size
             $modified = $item.FieldValues.Modified
-            
+
+            # --- PROGRESS BAR ---
+            $pct = [int](($FileCounter / $TotalFileCount) * 100)
+            $barLen  = 35
+            $filled  = [int](($pct / 100) * $barLen)
+            $bar     = ('█' * $filled) + ('░' * ($barLen - $filled))
+            Write-Progress `
+                -Activity   "  [6/6] Deleting versions — $Owner" `
+                -Status     "  [$FileCounter/$TotalFileCount]  ✓ $UserFilesWithVersions cleaned  ✗ $ErrorCount errors" `
+                -CurrentOperation "  $fileName" `
+                -PercentComplete $pct
+
             try {
                 # Get version count before deletion
                 $versions = Get-PnPFileVersion -Url $fileUrl -Connection $UserConn -ErrorAction SilentlyContinue
                 $versionCount = if ($versions) { $versions.Count } else { 0 }
-                
+
                 # Extract directory path from file URL
                 $filePath = $fileUrl
                 if ($filePath -match '^.*/') {
@@ -521,9 +567,6 @@ foreach ($Site in $TargetSites) {
                 } else {
                     $directory = "/"
                 }
-                
-                # Display file info in requested format: directory\filename - number of versions
-                Write-Host "        $filePath - $versionCount versions" -ForegroundColor $(if ($versionCount -gt 0) { "Cyan" } else { "DarkGray" })
                 
                 # Delete all versions at once (like web interface)
                 if ($versionCount -gt 0) {
@@ -577,9 +620,8 @@ foreach ($Site in $TargetSites) {
             
             $UserFilesProcessed++
         }
-        
-        Write-Host ""
-        
+
+        Write-Progress -Activity "  [6/6] Deleting versions" -Completed
         Write-Host ""
         Write-Host "  ┌───────────────────────────────────────────┐" -ForegroundColor DarkCyan
         Write-Host "  │          USER PROCESSING SUMMARY          │" -ForegroundColor Cyan
