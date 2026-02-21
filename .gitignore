@@ -1,2 +1,6 @@
 # Local config (contains saved Client ID)
 config.json
+
+# Certificates — never commit private keys
+*.pfx
+*.cer
