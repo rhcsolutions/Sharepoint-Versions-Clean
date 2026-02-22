@@ -474,7 +474,8 @@ function Process-UserSite {
             
             try {
                 $pct = [int](($fileNum / $TotalFileCount) * 100)
-                Set-Status "Cleaning file $fileNum / $TotalFileCount - $fileName" -pct $pct
+                $shortPath = $fileUrl -replace '^/personal/[^/]+/', '/'
+                Set-Status "$fileNum/$TotalFileCount $shortPath" -pct $pct
                 $versions = Get-PnPFileVersion -Url $fileUrl -Connection $UserConn -ErrorAction SilentlyContinue
                 $versionCount = if ($versions) { $versions.Count } else { 0 }
                 
@@ -595,14 +596,15 @@ $spinIdx = 0
 $totalUsers = $TargetSites.Count
 $E = [char]27
 
-# Calculate max owner name length for alignment
+# Calculate max owner name length for alignment — fixed 200 char width
 $maxOwnerLen = ($TargetSites | ForEach-Object { $_.Owner.Length } | Measure-Object -Maximum).Maximum
-$statusWidth = 90 - $maxOwnerLen - 4  # 4 = space + [ + ] + space
-if ($statusWidth -lt 20) { $statusWidth = 20 }
+$consoleWidth = 200
+$statusWidth = $consoleWidth - $maxOwnerLen - 5  # 5 = leading space + space + [ + ] + trailing
+if ($statusWidth -lt 30) { $statusWidth = 30 }
 # Bar width matches line 1 total: 1(space)+owner+1(space)+1([)+statusWidth+1(]) = owner+statusWidth+4
 # Bar line: 1(space) + bar + 1(space) + 4("100%") = bar needs owner+statusWidth+4 -1 -5 = owner+statusWidth-2
 $barWidth = $maxOwnerLen + $statusWidth - 2
-if ($barWidth -lt 20) { $barWidth = 20 }
+if ($barWidth -lt 30) { $barWidth = 30 }
 
 # Reserve lines: 1 overall + 2 per user (name + bar)
 $displayLines = 1 + ($totalUsers * 2)
@@ -639,7 +641,7 @@ while ($jobs.Count -gt 0) {
             if ($errCount -eq 0) { $suffix = " $E[32mV$E[0m" }
             else { $suffix = " $E[31mX$E[0m" }
         }
-        Write-Host "$E[2K $E[34m$padOwner$E[0m $E[32m[$padMsg]$E[0m$suffix" -NoNewline
+        Write-Host "$E[2K $E[36m$padOwner$E[0m $E[32m[$padMsg]$E[0m$suffix" -NoNewline
         $row++
 
         # Line 2: per-character gradient bar (red on left -> green on right)
@@ -662,8 +664,9 @@ while ($jobs.Count -gt 0) {
     }
 
     # ── Collect completed jobs ──────────────────────────────────────
-    # Move cursor below the display area before any Write-Host output from jobs
-    [Console]::SetCursorPosition(0, $startRow + $displayLines)
+    # Move cursor below the display area; recalculate startRow to survive console scrolling
+    [Console]::SetCursorPosition(0, $row)
+    $startRow = $row - $displayLines
 
     foreach ($job in @($jobs)) {
         if ($job.Handle.IsCompleted) {
