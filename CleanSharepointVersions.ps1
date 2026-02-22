@@ -16,7 +16,7 @@
 
 # --- STARTUP ANIMATION + BANNER ---
 function Show-Banner {
-    $spinner = @('|','/','—','\')
+    $spinner = @('|', '/', '—', '\')
     for ($i = 0; $i -lt 16; $i++) {
         Write-Host "`r  $($spinner[$i % 4])  Initializing..." -NoNewline -ForegroundColor DarkCyan
         Start-Sleep -Milliseconds 60
@@ -37,21 +37,22 @@ function Show-Banner {
 Show-Banner
 
 # ========== LOAD SAVED CONFIG ==========
-$AppName    = "SharePoint-Cleanup-Tool"
-$CertPath   = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
+$AppName = "SharePoint-Cleanup-Tool"
+$CertPath = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
 $ConfigPath = Join-Path $PSScriptRoot "config.json"
-$AdminEmail  = ""
-$TenantName  = ""
-$ClientId    = ""
+$AdminEmail = ""
+$TenantName = ""
+$ClientId = ""
 $AppObjectId = ""
 
 if (Test-Path $ConfigPath) {
     try {
-        $Config     = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+        $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
         $AdminEmail = $Config.AdminEmail
         $TenantName = $Config.TenantName
-        $ClientId   = $Config.ClientId
-    } catch {}
+        $ClientId = $Config.ClientId
+    }
+    catch {}
 }
 
 # ========== SAVED SETTINGS SHORTCUT ==========
@@ -88,9 +89,11 @@ if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
     # Extract tenant name from email
     if ($AdminEmail -match '@(.+?)\.onmicrosoft\.com') {
         $TenantName = $matches[1]
-    } elseif ($AdminEmail -match '@(.+?)\.') {
+    }
+    elseif ($AdminEmail -match '@(.+?)\.') {
         $TenantName = $matches[1]
-    } else {
+    }
+    else {
         Write-Host "✗ Could not extract tenant name from email. Exiting." -ForegroundColor Red
         exit
     }
@@ -104,7 +107,8 @@ if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
 # Check certificate
 if (Test-Path $CertPath) {
     Write-Host "  ✓ Certificate found: SharePoint-Cleanup-Tool.pfx" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  ⚠ Certificate not found at: $CertPath" -ForegroundColor Yellow
     Write-Host "    Will fall back to interactive browser login." -ForegroundColor Gray
 }
@@ -151,12 +155,12 @@ if ([string]::IsNullOrWhiteSpace($ClientId)) {
 
 # Save all settings for next run
 @{ AdminEmail = $AdminEmail; TenantName = $TenantName; ClientId = $ClientId } |
-    ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
+ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
 Write-Host "✓ App ID: $ClientId" -ForegroundColor Green
 Write-Host ""
 
 # ========== DEFAULTS ==========
-$VerboseLogging   = $true   # Always verbose
+$VerboseLogging = $true   # Always verbose
 $RemoveAccessAfter = $false  # Keep admin access after cleanup
 
 # ========== STEP 3: TARGET USERS ==========
@@ -185,7 +189,7 @@ $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 Write-Host ""
 
 # ========== BUILD URLS ==========
-$AdminUrl   = "https://$TenantName-admin.sharepoint.com"
+$AdminUrl = "https://$TenantName-admin.sharepoint.com"
 $MySiteHost = "https://$TenantName-my.sharepoint.com"
 
 # ========== CONNECT TO ADMIN CENTER ==========
@@ -201,12 +205,14 @@ try {
             -Tenant "$TenantName.onmicrosoft.com" `
             -CertificatePath $CertPath `
             -ErrorAction Stop
-    } else {
+    }
+    else {
         Write-Host "  No certificate — opening browser for $AdminEmail" -ForegroundColor Gray
         Connect-PnPOnline -Url $AdminUrl -Interactive -ClientId $ClientId -ErrorAction Stop
     }
     Write-Host "✓ Connected!" -ForegroundColor Green
-} catch {
+}
+catch {
     Write-Host "✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
     Write-Host "  • Verify the Client ID is correct for app '$AppName'" -ForegroundColor Yellow
@@ -226,7 +232,7 @@ try {
         -ErrorAction Stop
     $AppObjectId = $AppInfo.value[0].id
 
-    $SharePointAppId     = "00000003-0000-0ff1-ce00-000000000000"
+    $SharePointAppId = "00000003-0000-0ff1-ce00-000000000000"
     $AllSitesFullControl = "56680e0d-d2a3-4ae5-9b02-e4a12ea7f3b9"  # Delegated
     $SitesFullControlAll = "678536fe-1083-478a-9c59-b99265e6b0d3"  # Application
 
@@ -236,7 +242,7 @@ try {
                 resourceAppId  = $SharePointAppId
                 resourceAccess = @(
                     @{ id = $AllSitesFullControl; type = "Scope" }
-                    @{ id = $SitesFullControlAll;  type = "Role"  }
+                    @{ id = $SitesFullControlAll; type = "Role" }
                 )
             }
         )
@@ -265,7 +271,8 @@ Write-Host "(This may take a few minutes depending on tenant size)" -ForegroundC
 
 try {
     $AllSites = Get-PnPTenantSite -IncludeOneDriveSites -ErrorAction Stop
-} catch {
+}
+catch {
     Write-Host "✗ Failed to retrieve tenant sites!" -ForegroundColor Red
     Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
@@ -310,7 +317,7 @@ if ($ScopeChoice -eq "S") {
     $SelectedNumbers = Read-Host "User number(s)"
     
     # Parse the input numbers
-    $NumberArray = $SelectedNumbers -split ',' | ForEach-Object {$_.Trim()} | Where-Object {$_ -match '^\d+$'} | ForEach-Object {[int]$_}
+    $NumberArray = $SelectedNumbers -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
     
     if ($NumberArray.Count -eq 0) {
         Write-Host "✗ No valid numbers entered. Exiting." -ForegroundColor Red
@@ -333,7 +340,7 @@ if ($ScopeChoice -eq "S") {
         exit
     }
     
-    $TargetSites = $SharePointSites | Where-Object {$SelectedEmails -contains $_.Owner}
+    $TargetSites = $SharePointSites | Where-Object { $SelectedEmails -contains $_.Owner }
     
     Write-Host ""
     Write-Host "Selected user(s):" -ForegroundColor Cyan
@@ -412,7 +419,7 @@ foreach ($Site in $TargetSites) {
             Write-Host "        Error: $($_.Exception.Message)" -ForegroundColor Red
             $FailedSites += [PSCustomObject]@{
                 Owner = $Owner
-                Url = $Url
+                Url   = $Url
                 Error = "Connection failed"
             }
             continue
@@ -431,7 +438,8 @@ foreach ($Site in $TargetSites) {
                     $DocumentLibrary = $TestLib
                     break
                 }
-            } catch { }
+            }
+            catch { }
         }
         
         if (-not $DocumentLibrary) {
@@ -445,7 +453,7 @@ foreach ($Site in $TargetSites) {
             Write-Host " ✗ Not found" -ForegroundColor Red
             $FailedSites += [PSCustomObject]@{
                 Owner = $Owner
-                Url = $Url
+                Url   = $Url
                 Error = "No document library"
             }
             continue
@@ -463,7 +471,8 @@ foreach ($Site in $TargetSites) {
             # Then set the major versions limit
             Set-PnPList -Identity $LibraryName -MajorVersions 1 -Connection $UserConn -ErrorAction Stop
             Write-Host " ✓" -ForegroundColor Green
-        } catch {
+        }
+        catch {
             Write-Host " ⚠ Could not modify" -ForegroundColor Yellow
             Write-Host "        (Versioning may already be disabled or library is read-only)" -ForegroundColor Gray
         }
@@ -481,7 +490,7 @@ foreach ($Site in $TargetSites) {
             
             # Get files in smaller batches to avoid timeout
             $AllFiles = Get-PnPListItem -List $LibraryName -PageSize 1000 -Connection $UserConn -Fields "FileLeafRef", "FileRef", "File_x0020_Size", "Modified" | 
-                        Where-Object { $_.FileSystemObjectType -eq "File" }
+            Where-Object { $_.FileSystemObjectType -eq "File" }
             
             $TotalFileCount = $AllFiles.Count
             Write-Host " ✓ Found $TotalFileCount file(s)" -ForegroundColor Cyan
@@ -492,7 +501,7 @@ foreach ($Site in $TargetSites) {
             # Fallback: Get files without additional fields (faster)
             try {
                 $AllFiles = Get-PnPListItem -List $LibraryName -PageSize 500 -Connection $UserConn | 
-                            Where-Object { $_.FileSystemObjectType -eq "File" }
+                Where-Object { $_.FileSystemObjectType -eq "File" }
                 
                 $TotalFileCount = $AllFiles.Count
                 Write-Host ""
@@ -504,7 +513,7 @@ foreach ($Site in $TargetSites) {
                 Write-Host "        Recommendation: Process this library directly in SharePoint" -ForegroundColor Yellow
                 $FailedSites += [PSCustomObject]@{
                     Owner = $Owner
-                    Url = $Url
+                    Url   = $Url
                     Error = "Library scan timeout - too many files"
                 }
                 continue
@@ -534,7 +543,7 @@ foreach ($Site in $TargetSites) {
         $FileCounter = 0
         $TotalVersionsCount = 0
         
-        Write-Host "        Processing $TotalFileCount file(s) - Deleting all versions at once..." -ForegroundColor Cyan
+        Write-Host "        Processing $TotalFileCount file(s) — verbose output below:" -ForegroundColor Cyan
         Write-Host ""
 
         foreach ($item in $AllFiles) {
@@ -546,14 +555,17 @@ foreach ($Site in $TargetSites) {
 
             # --- PROGRESS BAR ---
             $pct = [int](($FileCounter / $TotalFileCount) * 100)
-            $barLen  = 35
-            $filled  = [int](($pct / 100) * $barLen)
-            $bar     = ('█' * $filled) + ('░' * ($barLen - $filled))
+            $barLen = 35
+            $filled = [int](($pct / 100) * $barLen)
+            $bar = ('█' * $filled) + ('░' * ($barLen - $filled))
             Write-Progress `
                 -Activity   "  [6/6] Deleting versions — $Owner" `
                 -Status     "  [$FileCounter/$TotalFileCount]  ✓ $UserFilesWithVersions cleaned  ✗ $ErrorCount errors" `
                 -CurrentOperation "  $fileName" `
                 -PercentComplete $pct
+
+            # Verbose: print file being processed
+            Write-Host "        [$FileCounter/$TotalFileCount] $fileName" -ForegroundColor DarkGray -NoNewline
 
             try {
                 # Get version count before deletion
@@ -564,28 +576,29 @@ foreach ($Site in $TargetSites) {
                 $filePath = $fileUrl
                 if ($filePath -match '^.*/') {
                     $directory = $matches[0].TrimEnd('/')
-                } else {
+                }
+                else {
                     $directory = "/"
                 }
-                
+
                 # Delete all versions at once (like web interface)
                 if ($versionCount -gt 0) {
                     $retryCount = 0
                     $maxRetries = 3
                     $success = $false
-                    
+
                     while (-not $success -and $retryCount -lt $maxRetries) {
                         try {
                             # Use Remove-PnPFileVersion with -All flag to delete all versions in one operation
                             Remove-PnPFileVersion -Url $fileUrl -All -Force -Connection $UserConn -ErrorAction Stop
                             $success = $true
-                            
+
                             $UserFilesWithVersions++
                             $TotalVersionsCount += $versionCount
                         }
                         catch {
                             $errorMsg = $_.Exception.Message
-                            
+
                             # Check if it's a "no versions" error
                             if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*" -or $errorMsg -like "*not found*") {
                                 $success = $true  # Not an error, just no versions
@@ -602,22 +615,29 @@ foreach ($Site in $TargetSites) {
                             }
                         }
                     }
-                } else {
+
+                    if ($success -and $versionCount -gt 0) {
+                        Write-Host "  → ✓ $versionCount version(s) deleted" -ForegroundColor Green
+                    }
+                }
+                else {
                     $UserFilesSkipped++
+                    Write-Host "  → skipped (no versions)" -ForegroundColor DarkGray
                 }
             }
             catch {
                 $errorMsg = $_.Exception.Message
-                
+
                 if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*") {
                     $UserFilesSkipped++
+                    Write-Host "  → skipped (no versions)" -ForegroundColor DarkGray
                 }
                 else {
-                    Write-Host "        ✗ $filePath - ERROR: $errorMsg" -ForegroundColor Red
+                    Write-Host "  → ✗ ERROR: $errorMsg" -ForegroundColor Red
                     $ErrorCount++
                 }
             }
-            
+
             $UserFilesProcessed++
         }
 
@@ -651,11 +671,12 @@ foreach ($Site in $TargetSites) {
             }
         }
         
-    } catch {
+    }
+    catch {
         Write-Host "  ✗ FATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
         $FailedSites += [PSCustomObject]@{
             Owner = $Owner
-            Url = $Url
+            Url   = $Url
             Error = $_.Exception.Message
         }
     }
@@ -689,3 +710,4 @@ Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "Script completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
