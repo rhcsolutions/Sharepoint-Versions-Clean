@@ -10,6 +10,7 @@ Automated PowerShell script to bulk-delete file version history from OneDrive pe
 - **Smart app registration** — creates a new Azure AD app with all required permissions, or reuses existing
 - **Auto-verifies permissions** — patches `Sites.FullControl.All` via Graph API every connection
 - **Bulk version deletion** — scans all files per user, deletes all versions with retry logic
+- **Verbose output** — shows progress for every file being processed
 - **Per-user + final summary** reported at the end
 
 ## Requirements
@@ -69,6 +70,7 @@ Press **Enter** — skips directly to user selection.
 | File | Purpose |
 | --- | --- |
 | `CleanSharepointVersions.ps1` | Main script |
+| `fix_encoding.ps1` | Utility to fix encoding issues (run if script fails to parse) |
 | `SharePoint-Cleanup-Tool.pfx` | Certificate for app authentication |
 | `SharePoint-Cleanup-Tool.cer` | Public cert — upload to Azure AD app |
 | `config.json` | Saved settings (gitignored, created on first run) |
@@ -177,6 +179,12 @@ Choice (A/S): s
   [5/6] Scanning files... ✓ Found 1,245 file(s)
   [6/6] Deleting versions...
 
+  Processing 1,245 file(s) — verbose output below:
+  [1/1245] report.xlsx  → ✓ 3 version(s) deleted
+  [2/1245] budget.xlsx  → ✓ 5 version(s) deleted
+  [3/1245] notes.docx  → skipped (no versions)
+  ...
+
   ┌───────────────────────────────────────────┐
   │          USER PROCESSING SUMMARY          │
   │ Total Files:                         1245 │
@@ -187,6 +195,16 @@ Choice (A/S): s
 ```
 
 ## Troubleshooting
+
+### Script fails to parse with "Missing closing" errors
+
+The PowerShell script file may have encoding issues. Run the included utility:
+
+```powershell
+.\fix_encoding.ps1
+```
+
+Then re-run the main script.
 
 ### "Attempted to perform an unauthorized operation" on `Get-PnPTenantSite`
 
