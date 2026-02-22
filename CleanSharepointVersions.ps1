@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     SharePoint Version Cleanup Tool
 
@@ -13,6 +13,11 @@
     Telegram: t.me/rhcsolutions
     Updated:  2026
 #>
+
+# ========== PARAMETERS ==========
+param(
+    [int]$MaxThreads = 10
+)
 
 # --- STARTUP ANIMATION + BANNER ---
 function Show-Banner {
@@ -378,55 +383,43 @@ Write-Host "══════════════════════�
 Write-Host "              STARTING VERSION CLEANUP                    " -ForegroundColor Green
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
+Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "   Parallel processing: $MaxThreads threads" -ForegroundColor Cyan
+Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
 
-$TotalFilesProcessed = 0
-$TotalVersionsDeleted = 0
-$FailedSites = @()
-$UserNumber = 0
-
-foreach ($Site in $TargetSites) {
-    $UserNumber++
-    $Url = $Site.Url
-    $Owner = $Site.Owner
+function Process-UserSite {
+    param(
+        [string]$Url,
+        [string]$Owner,
+        [string]$AdminEmail,
+        [string]$ClientId,
+        [string]$CertPath,
+        [int]$ThreadId
+    )
     
-    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Cyan
-    Write-Host "│ USER [$UserNumber/$($TargetSites.Count)]: $Owner" -ForegroundColor Cyan
-    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Cyan
-    Write-Host "URL: $Url" -ForegroundColor DarkGray
-    Write-Host ""
+    $result = [PSCustomObject]@{
+        ThreadId         = $ThreadId
+        Owner            = $Owner
+        Url              = $Url
+        Success          = $false
+        FilesProcessed   = 0
+        VersionsDeleted  = 0
+        FilesSkipped     = 0
+        Errors           = 0
+        ErrorMessage     = ""
+    }
     
     try {
-        # GRANT ADMIN ACCESS
-        Write-Host "  [1/6] Granting admin access..." -NoNewline
+        $UserConn = $null
+        
         try {
-            Set-PnPTenantSite -Url $Url -Owners @($AdminEmail) -ErrorAction Stop
+            Set-PnPTenantSite -Url $Url -Owners @($AdminEmail) -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Seconds 2
-            Write-Host " ✓" -ForegroundColor Green
         }
-        catch {
-            Write-Host " ⚠ Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-Host "        Attempting to continue..." -ForegroundColor Gray
-        }
+        catch { }
         
-        # CONNECT TO SITE
-        Write-Host "  [2/6] Connecting to user site..." -NoNewline
-        try {
-            $UserConn = Connect-PnPOnline -Url $Url -Interactive -ClientId $ClientId -ReturnConnection -ErrorAction Stop
-            Write-Host " ✓" -ForegroundColor Green
-        }
-        catch {
-            Write-Host " ✗ Failed" -ForegroundColor Red
-            Write-Host "        Error: $($_.Exception.Message)" -ForegroundColor Red
-            $FailedSites += [PSCustomObject]@{
-                Owner = $Owner
-                Url   = $Url
-                Error = "Connection failed"
-            }
-            continue
-        }
-        
-        # DETECT LIBRARY
-        Write-Host "  [3/6] Detecting document library..." -NoNewline
+        $UserConn = Connect-PnPOnline -Url $Url -Interactive -ClientId $ClientId -ReturnConnection -ErrorAction Stop
         
         $DocumentLibrary = $null
         $PossibleNames = @("Documents", "Shared Documents", "Documenten", "Dokumenty", "Documentos")
@@ -450,237 +443,232 @@ foreach ($Site in $TargetSites) {
         }
         
         if (-not $DocumentLibrary) {
-            Write-Host " ✗ Not found" -ForegroundColor Red
-            $FailedSites += [PSCustomObject]@{
-                Owner = $Owner
-                Url   = $Url
-                Error = "No document library"
-            }
-            continue
+            $result.ErrorMessage = "No document library found"
+            return $result
         }
         
         $LibraryName = $DocumentLibrary.Title
-        Write-Host " ✓ '$LibraryName'" -ForegroundColor Green
         
-        # SET VERSION LIMIT
-        Write-Host "  [4/6] Setting version limit to 1..." -NoNewline
         try {
-            # First, enable versioning if it's not already enabled
-            Set-PnPList -Identity $LibraryName -EnableVersioning $true -Connection $UserConn -ErrorAction Stop
-            
-            # Then set the major versions limit
-            Set-PnPList -Identity $LibraryName -MajorVersions 1 -Connection $UserConn -ErrorAction Stop
-            Write-Host " ✓" -ForegroundColor Green
+            Set-PnPList -Identity $LibraryName -EnableVersioning $true -Connection $UserConn -ErrorAction SilentlyContinue | Out-Null
+            Set-PnPList -Identity $LibraryName -MajorVersions 1 -Connection $UserConn -ErrorAction SilentlyContinue | Out-Null
         }
-        catch {
-            Write-Host " ⚠ Could not modify" -ForegroundColor Yellow
-            Write-Host "        (Versioning may already be disabled or library is read-only)" -ForegroundColor Gray
-        }
-
-        # SCAN FILES
-        Write-Host "  [5/6] Scanning files..." -NoNewline
+        catch { }
         
         $AllFiles = @()
-        $TotalFileCount = 0
-        
         try {
-            # Increase timeout and use batched approach
-            $Context = $UserConn.Context
-            $Context.RequestTimeout = 300000  # 5 minutes timeout
-            
-            # Get files in smaller batches to avoid timeout
             $AllFiles = Get-PnPListItem -List $LibraryName -PageSize 1000 -Connection $UserConn -Fields "FileLeafRef", "FileRef", "File_x0020_Size", "Modified" | 
-            Where-Object { $_.FileSystemObjectType -eq "File" }
-            
-            $TotalFileCount = $AllFiles.Count
-            Write-Host " ✓ Found $TotalFileCount file(s)" -ForegroundColor Cyan
+                Where-Object { $_.FileSystemObjectType -eq "File" }
         }
         catch {
-            Write-Host " ⚠ Timeout - Trying alternative method..." -ForegroundColor Yellow
-            
-            # Fallback: Get files without additional fields (faster)
             try {
                 $AllFiles = Get-PnPListItem -List $LibraryName -PageSize 500 -Connection $UserConn | 
-                Where-Object { $_.FileSystemObjectType -eq "File" }
-                
-                $TotalFileCount = $AllFiles.Count
-                Write-Host ""
-                Write-Host "        ✓ Found $TotalFileCount file(s) (using fast scan)" -ForegroundColor Cyan
+                    Where-Object { $_.FileSystemObjectType -eq "File" }
             }
             catch {
-                Write-Host " ✗ Failed to scan" -ForegroundColor Red
-                Write-Host "        Error: Library may be too large or have too many items" -ForegroundColor Red
-                Write-Host "        Recommendation: Process this library directly in SharePoint" -ForegroundColor Yellow
-                $FailedSites += [PSCustomObject]@{
-                    Owner = $Owner
-                    Url   = $Url
-                    Error = "Library scan timeout - too many files"
-                }
-                continue
+                $result.ErrorMessage = "Failed to scan library"
+                return $result
             }
         }
         
+        $TotalFileCount = $AllFiles.Count
+        
         if ($TotalFileCount -eq 0) {
-            Write-Host "        No files to process." -ForegroundColor Gray
-            Write-Host ""
-            continue
+            $result.Success = $true
+            $result.FilesProcessed = 0
+            return $result
         }
         
-        # Show warning for large libraries
-        if ($TotalFileCount -gt 5000) {
-            Write-Host "        ⚠ Large library detected ($TotalFileCount files)" -ForegroundColor Yellow
-            Write-Host "        This may take a while. Processing in batches..." -ForegroundColor Gray
-        }
-        
-        # DELETE VERSIONS - Bulk operation for speed
-        Write-Host "  [6/6] Deleting versions..." -ForegroundColor Yellow
-        Write-Host ""
-        
-        $UserFilesProcessed = 0
         $UserFilesWithVersions = 0
         $UserFilesSkipped = 0
         $ErrorCount = 0
-        $FileCounter = 0
         $TotalVersionsCount = 0
         
-        Write-Host "        Processing $TotalFileCount file(s) — verbose output below:" -ForegroundColor Cyan
-        Write-Host ""
-
         foreach ($item in $AllFiles) {
-            $FileCounter++
             $fileName = $item.FieldValues.FileLeafRef
             $fileUrl = $item.FieldValues.FileRef
-            $fileSize = $item.FieldValues.File_x0020_Size
-            $modified = $item.FieldValues.Modified
-
-            # --- PROGRESS BAR ---
-            $pct = [int](($FileCounter / $TotalFileCount) * 100)
-            $barLen = 35
-            $filled = [int](($pct / 100) * $barLen)
-            $bar = ('█' * $filled) + ('░' * ($barLen - $filled))
-            Write-Progress `
-                -Activity   "  [6/6] Deleting versions — $Owner" `
-                -Status     "  [$FileCounter/$TotalFileCount]  ✓ $UserFilesWithVersions cleaned  ✗ $ErrorCount errors" `
-                -CurrentOperation "  $fileName" `
-                -PercentComplete $pct
-
-            # Verbose: print file being processed
-            Write-Host "        [$FileCounter/$TotalFileCount] $fileName" -ForegroundColor DarkGray -NoNewline
-
+            
             try {
-                # Get version count before deletion
                 $versions = Get-PnPFileVersion -Url $fileUrl -Connection $UserConn -ErrorAction SilentlyContinue
                 $versionCount = if ($versions) { $versions.Count } else { 0 }
-
-                # Extract directory path from file URL
-                $filePath = $fileUrl
-                if ($filePath -match '^.*/') {
-                    $directory = $matches[0].TrimEnd('/')
-                }
-                else {
-                    $directory = "/"
-                }
-
-                # Delete all versions at once (like web interface)
+                
                 if ($versionCount -gt 0) {
                     $retryCount = 0
                     $maxRetries = 3
                     $success = $false
-
+                    
                     while (-not $success -and $retryCount -lt $maxRetries) {
                         try {
-                            # Use Remove-PnPFileVersion with -All flag to delete all versions in one operation
                             Remove-PnPFileVersion -Url $fileUrl -All -Force -Connection $UserConn -ErrorAction Stop
                             $success = $true
-
                             $UserFilesWithVersions++
                             $TotalVersionsCount += $versionCount
                         }
                         catch {
                             $errorMsg = $_.Exception.Message
-
-                            # Check if it's a "no versions" error
                             if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*" -or $errorMsg -like "*not found*") {
-                                $success = $true  # Not an error, just no versions
-                                $UserFilesSkipped++
+                                $success = $true
                             }
                             else {
                                 $retryCount++
                                 if ($retryCount -lt $maxRetries) {
                                     Start-Sleep -Milliseconds 500
                                 }
-                                else {
-                                    throw $_
-                                }
                             }
                         }
                     }
-
-                    if ($success -and $versionCount -gt 0) {
-                        Write-Host "  → ✓ $versionCount version(s) deleted" -ForegroundColor Green
+                    
+                    if (-not $success) {
+                        $ErrorCount++
                     }
                 }
                 else {
                     $UserFilesSkipped++
-                    Write-Host "  → skipped (no versions)" -ForegroundColor DarkGray
                 }
             }
             catch {
                 $errorMsg = $_.Exception.Message
-
-                if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*") {
-                    $UserFilesSkipped++
-                    Write-Host "  → skipped (no versions)" -ForegroundColor DarkGray
-                }
-                else {
-                    Write-Host "  → ✗ ERROR: $errorMsg" -ForegroundColor Red
+                if ($errorMsg -notlike "*No file versions*" -and $errorMsg -notlike "*versions to delete*") {
                     $ErrorCount++
                 }
-            }
-
-            $UserFilesProcessed++
-        }
-
-        Write-Progress -Activity "  [6/6] Deleting versions" -Completed
-        Write-Host ""
-        Write-Host "  ┌───────────────────────────────────────────┐" -ForegroundColor DarkCyan
-        Write-Host "  │          USER PROCESSING SUMMARY          │" -ForegroundColor Cyan
-        Write-Host "  ├───────────────────────────────────────────┤" -ForegroundColor DarkCyan
-        Write-Host "  │ Total Files:     $($TotalFileCount.ToString().PadLeft(20)) │" -ForegroundColor White
-        Write-Host "  │ Cleaned:         $($UserFilesWithVersions.ToString().PadLeft(20)) │" -ForegroundColor Green
-        Write-Host "  │ Skipped:         $($UserFilesSkipped.ToString().PadLeft(20)) │" -ForegroundColor Yellow
-        Write-Host "  │ Errors:          $($ErrorCount.ToString().PadLeft(20)) │" -ForegroundColor $(if ($ErrorCount -gt 0) { "Red" } else { "Green" })
-        Write-Host "  └───────────────────────────────────────────┘" -ForegroundColor DarkCyan
-        Write-Host ""
-        
-        $TotalFilesProcessed += $UserFilesProcessed
-        $TotalVersionsDeleted += $UserFilesWithVersions
-        
-        # REMOVE ADMIN ACCESS
-        if ($RemoveAccessAfter) {
-            Write-Host "  [Cleanup] Removing admin access..." -NoNewline
-            try {
-                $SiteOwners = Get-PnPSiteCollectionAdmin -Connection $UserConn | Where-Object { $_.LoginName -like "*$AdminEmail*" }
-                foreach ($Admin in $SiteOwners) {
-                    Remove-PnPSiteCollectionAdmin -Owners $Admin.LoginName -Connection $UserConn -ErrorAction SilentlyContinue
+                else {
+                    $UserFilesSkipped++
                 }
-                Write-Host " ✓" -ForegroundColor Green
-            }
-            catch {
-                Write-Host " ⚠" -ForegroundColor Yellow
             }
         }
         
+        $result.Success = $true
+        $result.FilesProcessed = $TotalFileCount
+        $result.VersionsDeleted = $TotalVersionsCount
+        $result.FilesSkipped = $UserFilesSkipped
+        $result.Errors = $ErrorCount
     }
     catch {
-        Write-Host "  ✗ FATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
-        $FailedSites += [PSCustomObject]@{
-            Owner = $Owner
-            Url   = $Url
-            Error = $_.Exception.Message
+        $result.ErrorMessage = $_.Exception.Message
+    }
+    
+    return $result
+}
+
+$TotalFilesProcessed = 0
+$TotalVersionsDeleted = 0
+$FailedSites = @()
+$CompletedSites = @()
+$UserNumber = 0
+
+$runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxThreads)
+$runspacePool.Open()
+
+$jobs = @()
+
+Write-Host "[PROCESSING] Starting parallel processing..." -ForegroundColor Yellow
+Write-Host ""
+
+foreach ($Site in $TargetSites) {
+    $UserNumber++
+    $Url = $Site.Url
+    $Owner = $Site.Owner
+    
+    Write-Host "[$UserNumber/$($TargetSites.Count)] Queuing: $Owner" -ForegroundColor Cyan
+    
+    $powershell = [powershell]::Create().AddScript({
+        param($Url, $Owner, $AdminEmail, $ClientId, $CertPath, $ThreadId)
+        Process-UserSite -Url $Url -Owner $Owner -AdminEmail $AdminEmail -ClientId $ClientId -CertPath $CertPath -ThreadId $ThreadId
+    }).AddParameter("Url", $Url).AddParameter("Owner", $Owner).AddParameter("AdminEmail", $AdminEmail).AddParameter("ClientId", $ClientId).AddParameter("CertPath", $CertPath).AddParameter("ThreadId", $UserNumber)
+    
+    $powershell.RunspacePool = $runspacePool
+    
+    $jobs += [PSCustomObject]@{
+        PowerShell = $powershell
+        Handle     = $powershell.BeginInvoke()
+        Owner      = $Owner
+        Url        = $Url
+    }
+}
+
+Write-Host ""
+Write-Host "[PROCESSING] Waiting for all jobs to complete..." -ForegroundColor Yellow
+Write-Host ""
+
+$jobResults = @()
+$completed = 0
+
+while ($jobs.Count -gt 0) {
+    foreach ($job in $jobs.ToArray()) {
+        if ($job.Handle.IsCompleted) {
+            try {
+                $result = $job.PowerShell.EndInvoke($job.Handle)
+                $jobResults += $result
+                
+                $completed++
+                
+                if ($result.Success) {
+                    Write-Host "[$completed/$($TargetSites.Count)] OK $Owner - $($result.FilesProcessed) files, $($result.VersionsDeleted) versions deleted" -ForegroundColor Green
+                    $TotalFilesProcessed += $result.FilesProcessed
+                    $TotalVersionsDeleted += $result.VersionsDeleted
+                    $CompletedSites += [PSCustomObject]@{
+                        Owner            = $result.Owner
+                        Url              = $result.Url
+                        FilesProcessed   = $result.FilesProcessed
+                        VersionsDeleted  = $result.VersionsDeleted
+                        FilesSkipped     = $result.FilesSkipped
+                        Errors           = $result.Errors
+                    }
+                }
+                else {
+                    Write-Host "[$completed/$($TargetSites.Count)] FAIL $Owner - $($result.ErrorMessage)" -ForegroundColor Red
+                    $FailedSites += [PSCustomObject]@{
+                        Owner = $result.Owner
+                        Url   = $result.Url
+                        Error = $result.ErrorMessage
+                    }
+                }
+            }
+            catch {
+                Write-Host "[$completed/$($TargetSites.Count)] ERROR $Owner - $($_.Exception.Message)" -ForegroundColor Red
+                $FailedSites += [PSCustomObject]@{
+                    Owner = $job.Owner
+                    Url   = $job.Url
+                    Error = $_.Exception.Message
+                }
+            }
+            
+            $job.PowerShell.Dispose()
+            $jobs.Remove($job)
         }
     }
     
+    if ($jobs.Count -gt 0) {
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+$runspacePool.Close()
+$runspacePool.Dispose()
+
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "                   PROCESSING COMPLETE                      " -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+if ($CompletedSites.Count -gt 0) {
+    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Green
+    Write-Host "│                  SUCCESSFUL SITES                       │" -ForegroundColor Green
+    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Green
+    
+    foreach ($site in $CompletedSites) {
+        Write-Host "  User:      $($site.Owner)" -ForegroundColor White
+        Write-Host "  Files:     $($site.FilesProcessed)" -ForegroundColor Gray
+        Write-Host "  Versions:  $($site.VersionsDeleted)" -ForegroundColor Gray
+        Write-Host "  Skipped:   $($site.FilesSkipped)" -ForegroundColor Gray
+        Write-Host "  Errors:    $($site.Errors)" -ForegroundColor Gray
+        Write-Host "  ----------------------------------------" -ForegroundColor DarkGray
+    }
+    
+    Write-Host ""
+    Write-Host "  TOTAL FILES PROCESSED:    $TotalFilesProcessed" -ForegroundColor Cyan
+    Write-Host "  TOTAL VERSIONS DELETED:   $TotalVersionsDeleted" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -710,4 +698,5 @@ Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "Script completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
 
