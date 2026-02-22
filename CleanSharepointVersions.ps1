@@ -594,7 +594,7 @@ $jobResults = @()
 $completed = 0
 
 while ($jobs.Count -gt 0) {
-    foreach ($job in $jobs.ToArray()) {
+    foreach ($job in @($jobs)) {
         if ($job.Handle.IsCompleted) {
             try {
                 $result = $job.PowerShell.EndInvoke($job.Handle)
@@ -698,5 +698,6 @@ Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "Script completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
 
 
