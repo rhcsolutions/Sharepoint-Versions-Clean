@@ -4,6 +4,7 @@ Automated PowerShell script to bulk-delete file version history from OneDrive pe
 
 ## Overview
 
+- **Parallel processing** — processes multiple users simultaneously (default: 10 threads)
 - **Certificate authentication** — no browser popup, connects silently using the included `.pfx`
 - **Remembers your settings** — admin account, tenant, and app ID saved to `config.json` after first run
 - **Repeat runs: one keypress** — press Enter to reuse saved settings, or `N` to switch tenant/app
@@ -35,6 +36,12 @@ Install-Module PnP.PowerShell -Scope CurrentUser
 
 ```powershell
 .\CleanSharepointVersions.ps1
+```
+
+To use a different number of threads (default is 10):
+
+```powershell
+.\CleanSharepointVersions.ps1 -MaxThreads 20
 ```
 
 ### 3. First run — answer 2 questions
