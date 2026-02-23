@@ -777,10 +777,11 @@ $maxOwnerLen = ($TargetSites | ForEach-Object { $_.Owner.Length } | Measure-Obje
 $consoleWidth = 200
 $statusWidth = $consoleWidth - $maxOwnerLen - 5  # 5 = leading space + space + [ + ] + trailing
 if ($statusWidth -lt 30) { $statusWidth = 30 }
-# Bar width matches line 1 total: 1(space)+owner+1(space)+1([)+statusWidth+1(]) = owner+statusWidth+4
-# Bar line: 1(space) + bar + 1(space) + 4("100%") = bar needs owner+statusWidth+4 -1 -5 = owner+statusWidth-2
-$barWidth = $maxOwnerLen + $statusWidth - 2
-if ($barWidth -lt 30) { $barWidth = 30 }
+# Bar width: total = 1(lead) + verWidth + 1(space) + bar + 1(space) + 4(pct)
+# Leave 22 chars for versioning label on line 2
+$verWidth = 22
+$barWidth = $maxOwnerLen + $statusWidth - 2 - $verWidth - 1
+if ($barWidth -lt 20) { $barWidth = 20 }
 
 # Reserve lines: 1 overall + 2 per user (name + bar)
 $displayLines = 1 + ($totalUsers * 2)
@@ -807,10 +808,15 @@ while ($jobs.Count -gt 0) {
         else { $stMsg = $stObj.msg; $stPct = $stObj.pct; $isDone = $stObj.done; $errCount = $stObj.errors; $stVer = $stObj.versioning }
         if ($stMsg -like '*Done*') { $stPct = 100 }
 
-        # Build versioning badge (cyan, compact) — only when known
-        $verBadge = if ($stVer) { " $E[33m[$stVer]$E[0m" } else { "" }
+        # Build versioning label for line 2 — fixed 22-char slot, yellow when ON, dim when OFF/unknown
+        $verLabel = if ($stVer) {
+            $v = $stVer.PadRight($verWidth).Substring(0, $verWidth)
+            if ($stVer -like 'Ver:ON*') { "$E[33m$v$E[0m" } else { "$E[90m$v$E[0m" }
+        } else {
+            "$E[90m$("—".PadRight($verWidth))$E[0m"
+        }
 
-        # Line 1: blue username + green [status] + versioning badge + checkmark/X
+        # Line 1: blue username + green [status] + checkmark/X  (no overflow)
         [Console]::SetCursorPosition(0, $row)
         $padOwner = $site.Owner.PadRight($maxOwnerLen)
         $padMsg = $stMsg.PadRight($statusWidth).Substring(0, $statusWidth)
@@ -819,10 +825,10 @@ while ($jobs.Count -gt 0) {
             if ($errCount -eq 0) { $suffix = " $E[32mV$E[0m" }
             else { $suffix = " $E[31mX$E[0m" }
         }
-        Write-Host "$E[2K $E[36m$padOwner$E[0m $E[32m[$padMsg]$E[0m$verBadge$suffix" -NoNewline
+        Write-Host "$E[2K $E[36m$padOwner$E[0m $E[32m[$padMsg]$E[0m$suffix" -NoNewline
         $row++
 
-        # Line 2: per-character gradient bar (red on left -> green on right)
+        # Line 2: versioning label + gradient bar + percentage
         [Console]::SetCursorPosition(0, $row)
         $uFilled = [int](($stPct / 100) * $barWidth)
         if ($uFilled -gt $barWidth) { $uFilled = $barWidth }
@@ -837,7 +843,7 @@ while ($jobs.Count -gt 0) {
         $pctR = [int](255 - ($stPct * 2.55))
         $pctG = [int]($stPct * 2.55)
         $pctStr = "$stPct%".PadLeft(4)
-        Write-Host "$E[2K $barStr$E[0m $E[38;2;${pctR};${pctG};0m$pctStr$E[0m" -NoNewline
+        Write-Host "$E[2K $verLabel $barStr$E[0m $E[38;2;${pctR};${pctG};0m$pctStr$E[0m" -NoNewline
         $row++
     }
 
