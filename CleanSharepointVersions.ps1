@@ -16,7 +16,7 @@
 
 # ========== PARAMETERS ==========
 param(
-    [int]$MaxThreads = 10
+    [int]$MaxThreads = 5
 )
 
 # --- STARTUP ANIMATION + BANNER ---
@@ -284,28 +284,7 @@ Write-Host "[DISCOVERY] Scanning for OneDrive sites..." -ForegroundColor Green
 Write-Host "(This may take a few minutes depending on tenant size)" -ForegroundColor Green
 
 try {
-    # -Paging fetches 300 sites per HTTP request instead of one giant blocking call,
-    # preventing the 100-second HttpClient timeout on large tenants.
-    # Retry up to 5 times on throttle / cancellation errors.
-    $SharePointSites = $null
-    $discoverAttempt = 0
-    $discoverMaxRetries = 5
-    while ($null -eq $SharePointSites) {
-        try {
-            $SharePointSites = Get-PnPTenantSite -IncludeOneDriveSites -Filter "Url -like '$MySiteHost/personal/'" -ErrorAction Stop
-        }
-        catch {
-            $discoverAttempt++
-            $errMsg = $_.Exception.Message + $_.Exception.InnerException.Message
-            $retryable = $errMsg -like '*throttl*' -or $errMsg -like '*429*' -or
-                         $errMsg -like '*canceled*' -or $errMsg -like '*timeout*' -or
-                         $errMsg -like '*timed out*'
-            if (-not $retryable -or $discoverAttempt -ge $discoverMaxRetries) { throw }
-            $delaySec = 15 * $discoverAttempt
-            Write-Host "  ⚠ Discovery attempt $discoverAttempt failed (throttled/timeout), retrying in $delaySec s..." -ForegroundColor Green
-            Start-Sleep -Seconds $delaySec
-        }
-    }
+    $AllSites = Get-PnPTenantSite -IncludeOneDriveSites -ErrorAction Stop
 }
 catch {
     Write-Host "✗ Failed to retrieve tenant sites!" -ForegroundColor Green
@@ -318,18 +297,16 @@ catch {
     Write-Host "  2. The certificate is not uploaded to the app" -ForegroundColor Green
     Write-Host "     → Azure Portal → App registrations → $AppName → Certificates & secrets" -ForegroundColor Green
     Write-Host "     → Upload SharePoint-Cleanup-Tool.cer" -ForegroundColor Green
-    Write-Host "  3. Persistent timeout after retries — tenant may be under heavy load" -ForegroundColor Green
-    Write-Host "     → Verify AdminUrl is correct: $AdminUrl" -ForegroundColor Green
-    Write-Host "     → Verify the my-site host: $MySiteHost" -ForegroundColor Green
-    Write-Host "     → Try re-running the script; discovery is retried automatically up to 5 times" -ForegroundColor Green
     exit
 }
 
+$SharePointSites = $AllSites | Where-Object { $_.Url -like "$MySiteHost/personal/*" }
 $Count = $SharePointSites.Count
 Write-Host "✓ Found $Count OneDrive site(s)" -ForegroundColor Green
 
 if ($Count -eq 0) {
-    Write-Host "✗ No OneDrive sites found matching: $MySiteHost/personal/*" -ForegroundColor Green
+    Write-Host "✗ No OneDrive sites found." -ForegroundColor Green
+    Write-Host "  Retrieved $($AllSites.Count) total site(s) but none matched: $MySiteHost/personal/*" -ForegroundColor Green
     exit
 }
 Write-Host ""
@@ -459,15 +436,19 @@ function Process-UserSite {
     }
     
     $result = [PSCustomObject]@{
-        ThreadId        = $ThreadId
-        Owner           = $Owner
-        Url             = $Url
-        Success         = $false
-        FilesProcessed  = 0
-        VersionsDeleted = 0
-        FilesSkipped    = 0
-        Errors          = 0
-        ErrorMessage    = ""
+        ThreadId             = $ThreadId
+        Owner                = $Owner
+        Url                  = $Url
+        Success              = $false
+        FilesProcessed       = 0
+        VersionsDeleted      = 0
+        FilesSkipped         = 0
+        Errors               = 0
+        ErrorMessage         = ""
+        VersioningEnabled    = $false
+        MajorVersionLimit    = 0
+        MinorVersionsEnabled = $false
+        MinorVersionLimit    = 0
     }
     
     try {
@@ -502,7 +483,7 @@ function Process-UserSite {
         $PossibleNames = @("Documents", "Shared Documents", "Documenten", "Dokumenty", "Documentos")
 
         # Fetch all lists in a single API call to avoid multiple round-trips (and throttling under load)
-        $AllLists = Invoke-PnPWithRetry { Get-PnPList -Connection $UserConn -ErrorAction Stop }
+        $AllLists = Invoke-PnPWithRetry { Get-PnPList -Includes EnableVersioning, MajorVersionLimit, EnableMinorVersions, MajorWithMinorVersionsLimit -Connection $UserConn -ErrorAction Stop }
 
         # First: try well-known library names (in-memory match, no extra API calls)
         foreach ($LibName in $PossibleNames) {
@@ -526,7 +507,13 @@ function Process-UserSite {
         }
         
         $LibraryName = $DocumentLibrary.Title
-        
+
+        # Versioning settings are already loaded from the bulk Get-PnPList call above
+        $result.VersioningEnabled    = $DocumentLibrary.EnableVersioning
+        $result.MajorVersionLimit    = $DocumentLibrary.MajorVersionLimit
+        $result.MinorVersionsEnabled = $DocumentLibrary.EnableMinorVersions
+        $result.MinorVersionLimit    = $DocumentLibrary.MajorWithMinorVersionsLimit
+
         Set-Status "Scanning files..." -pct 0
         $AllFiles = @()
         try {
@@ -723,27 +710,13 @@ for ($i = 0; $i -lt $displayLines; $i++) { Write-Host "" }
 # Save the starting row (cursor is now below reserved area)
 $startRow = [Console]::CursorTop - $displayLines
 
-# Ensure the console buffer is tall enough to hold the entire live display area
-try {
-    $bufNeeded = $startRow + $displayLines + 5
-    if ($bufNeeded -gt [Console]::BufferHeight) { [Console]::BufferHeight = $bufNeeded }
-} catch { }
-
-# Helper: move cursor only if the row is within the valid buffer range
-function Safe-CursorRow ([int]$r) {
-    $max = [Console]::BufferHeight - 1
-    if ($r -lt 0) { $r = 0 }
-    if ($r -gt $max) { $r = $max }
-    [Console]::SetCursorPosition(0, $r)
-}
-
 while ($jobs.Count -gt 0) {
 
     $row = $startRow
     $spin = $spinChars[$spinIdx % 4]; $spinIdx++
 
     # ── Overall status line ──────────────────────────────────────
-    Safe-CursorRow $row
+    [Console]::SetCursorPosition(0, $row)
     $overallText = " $spin  $completed / $totalUsers complete  |  Files: $TotalFilesProcessed  |  Files cleaned: $TotalVersionsDeleted"
     Write-Host "$E[2K$E[32m$overallText$E[0m" -NoNewline
     $row++
@@ -756,7 +729,7 @@ while ($jobs.Count -gt 0) {
         if ($stMsg -like '*Done*') { $stPct = 100 }
 
         # Line 1: blue username + green [status] — aligned ] + checkmark/X
-        Safe-CursorRow $row
+        [Console]::SetCursorPosition(0, $row)
         $padOwner = $site.Owner.PadRight($maxOwnerLen)
         $padMsg = $stMsg.PadRight($statusWidth).Substring(0, $statusWidth)
         $suffix = ""
@@ -768,7 +741,7 @@ while ($jobs.Count -gt 0) {
         $row++
 
         # Line 2: per-character gradient bar (red on left -> green on right)
-        Safe-CursorRow $row
+        [Console]::SetCursorPosition(0, $row)
         $uFilled = [int](($stPct / 100) * $barWidth)
         if ($uFilled -gt $barWidth) { $uFilled = $barWidth }
         if ($uFilled -lt 0) { $uFilled = 0 }
@@ -788,7 +761,7 @@ while ($jobs.Count -gt 0) {
 
     # ── Collect completed jobs ──────────────────────────────────────
     # Move cursor below the display area; recalculate startRow to survive console scrolling
-    Safe-CursorRow $row
+    [Console]::SetCursorPosition(0, $row)
     $startRow = $row - $displayLines
 
     foreach ($job in @($jobs)) {
@@ -802,12 +775,16 @@ while ($jobs.Count -gt 0) {
                     $TotalFilesProcessed += $result.FilesProcessed
                     $TotalVersionsDeleted += $result.VersionsDeleted
                     $CompletedSites += [PSCustomObject]@{
-                        Owner           = $result.Owner
-                        Url             = $result.Url
-                        FilesProcessed  = $result.FilesProcessed
-                        VersionsDeleted = $result.VersionsDeleted
-                        FilesSkipped    = $result.FilesSkipped
-                        Errors          = $result.Errors
+                        Owner                = $result.Owner
+                        Url                  = $result.Url
+                        FilesProcessed       = $result.FilesProcessed
+                        VersionsDeleted      = $result.VersionsDeleted
+                        FilesSkipped         = $result.FilesSkipped
+                        Errors               = $result.Errors
+                        VersioningEnabled    = $result.VersioningEnabled
+                        MajorVersionLimit    = $result.MajorVersionLimit
+                        MinorVersionsEnabled = $result.MinorVersionsEnabled
+                        MinorVersionLimit    = $result.MinorVersionLimit
                     }
                 }
                 else {
@@ -854,11 +831,16 @@ if ($CompletedSites.Count -gt 0) {
     Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Green
     
     foreach ($site in $CompletedSites) {
-        Write-Host "  User:      $($site.Owner)" -ForegroundColor Green
-        Write-Host "  Files:     $($site.FilesProcessed)" -ForegroundColor Green
-        Write-Host "  Cleaned:   $($site.VersionsDeleted)" -ForegroundColor Green
-        Write-Host "  Skipped:   $($site.FilesSkipped)" -ForegroundColor Green
-        Write-Host "  Errors:    $($site.Errors)" -ForegroundColor Green
+        $versioningLine = if ($site.VersioningEnabled) {
+            $minorStr = if ($site.MinorVersionsEnabled) { " | Minor: $($site.MinorVersionLimit) kept" } else { "" }
+            "Enabled  (Major: $($site.MajorVersionLimit) kept$minorStr)"
+        } else { "Disabled" }
+        Write-Host "  User:        $($site.Owner)" -ForegroundColor Green
+        Write-Host "  Versioning:  $versioningLine" -ForegroundColor Green
+        Write-Host "  Files:       $($site.FilesProcessed)" -ForegroundColor Green
+        Write-Host "  Cleaned:     $($site.VersionsDeleted)" -ForegroundColor Green
+        Write-Host "  Skipped:     $($site.FilesSkipped)" -ForegroundColor Green
+        Write-Host "  Errors:      $($site.Errors)" -ForegroundColor Green
         Write-Host "  ----------------------------------------" -ForegroundColor Green
     }
     
