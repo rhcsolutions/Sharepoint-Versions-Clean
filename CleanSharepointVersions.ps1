@@ -30,16 +30,58 @@ function Show-Banner {
     Write-Host ""
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-    Write-Host "  ║                                                    ║" -ForegroundColor Green
-    Write-Host "  ║    SharePoint Version Cleanup Tool                  ║" -ForegroundColor Green
-    Write-Host "  ║                                                    ║" -ForegroundColor Green
-    Write-Host "  ║    © RHC Solutions  •  rhcsolutions.com            ║" -ForegroundColor Green
-    Write-Host "  ║    Telegram: t.me/rhcsolutions                     ║" -ForegroundColor Green
-    Write-Host "  ║                                                    ║" -ForegroundColor Green
+    Write-Host "  ║                                                      ║" -ForegroundColor Green
+    Write-Host "  ║    SharePoint Version Cleanup Tool                   ║" -ForegroundColor Green
+    Write-Host "  ║                                                      ║" -ForegroundColor Green
+    Write-Host "  ║    © RHC Solutions  •  rhcsolutions.com              ║" -ForegroundColor Green
+    Write-Host "  ║    Telegram: t.me/rhcsolutions                       ║" -ForegroundColor Green
+    Write-Host "  ║                                                      ║" -ForegroundColor Green
     Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
     Write-Host ""
 }
 Show-Banner
+
+# ========== MODULE CHECK ==========
+$pnpModuleName = if (Get-Module -ListAvailable -Name PnP.PowerShell) { "PnP.PowerShell" }
+                 elseif (Get-Module -ListAvailable -Name SharePointPnPPowerShellOnline) { "SharePointPnPPowerShellOnline" }
+                 else { $null }
+
+if (-not $pnpModuleName) {
+    Write-Host "  PnP.PowerShell module not found." -ForegroundColor Green
+    Write-Host "  Installing now (this only happens once)..." -ForegroundColor Green
+    try {
+        Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        Write-Host "  ✓ PnP.PowerShell installed. Re-run the script." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  ✗ Failed to install: $($_.Exception.Message)" -ForegroundColor Green
+        Write-Host "  Run manually: Install-Module PnP.PowerShell -Scope CurrentUser -AllowClobber" -ForegroundColor Green
+    }
+    exit
+}
+Import-Module $pnpModuleName -Force -WarningAction SilentlyContinue -ErrorAction Stop
+if (-not (Get-Command Connect-PnPOnline -ErrorAction SilentlyContinue)) {
+    Write-Host "  ✗ PnP module loaded but Connect-PnPOnline not found. Try:" -ForegroundColor Green
+    Write-Host "    Uninstall-Module $pnpModuleName -AllVersions" -ForegroundColor Green
+    Write-Host "    Install-Module PnP.PowerShell -Scope CurrentUser -Force" -ForegroundColor Green
+    exit
+}
+
+# ========== SQLITE MODULE CHECK ==========
+if (-not (Get-Module -ListAvailable -Name PSSQLite)) {
+    Write-Host "  PSSQLite module not found." -ForegroundColor Green
+    Write-Host "  Installing now (this only happens once)..." -ForegroundColor Green
+    try {
+        Install-Module PSSQLite -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        Write-Host "  ✓ PSSQLite installed." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  ✗ Failed to install PSSQLite: $($_.Exception.Message)" -ForegroundColor Green
+        Write-Host "  Run manually: Install-Module PSSQLite -Scope CurrentUser" -ForegroundColor Green
+        exit
+    }
+}
+Import-Module PSSQLite -Force -WarningAction SilentlyContinue -ErrorAction Stop
 
 # ========== LOAD SAVED CONFIG ==========
 $AppName = "SharePoint-Cleanup-Tool"
@@ -48,7 +90,7 @@ $ConfigPath = Join-Path $PSScriptRoot "config.json"
 $AdminEmail = ""
 $TenantName = ""
 $ClientId = ""
-$AppObjectId = ""
+$DbPath   = Join-Path $PSScriptRoot "cleanup-cache.db"
 
 if (Test-Path $ConfigPath) {
     try {
@@ -164,17 +206,13 @@ ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
 Write-Host "✓ App ID: $ClientId" -ForegroundColor Green
 Write-Host ""
 
-# ========== DEFAULTS ==========
-$VerboseLogging = $true   # Always verbose
-$RemoveAccessAfter = $false  # Keep admin access after cleanup
-
 # ========== STEP 3: TARGET USERS ==========
 Write-Host "[STEP 3] Target Users (whose OneDrive versions will be deleted)" -ForegroundColor Green
 Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Green
 Write-Host "  [A] ALL users in the tenant" -ForegroundColor Green
 Write-Host "  [S] SPECIFIC user(s) — you will pick from a list" -ForegroundColor Green
 Write-Host ""
-$ScopeChoice = Read-Host "Choice (A/S)"
+$ScopeChoice = (Read-Host "Choice (A/S)").ToUpper().Trim()
 Write-Host ""
 
 # ========== CONFIGURATION SUMMARY ==========
@@ -185,8 +223,6 @@ Write-Host "  Tenant:         $TenantName.onmicrosoft.com" -ForegroundColor Gree
 Write-Host "  Admin account:  $AdminEmail" -ForegroundColor Green
 Write-Host "  App ID:         $ClientId" -ForegroundColor Green
 Write-Host "  Target users:   $(if ($ScopeChoice -eq 'A') { 'ALL users in tenant' } else { 'SPECIFIC users (selected after discovery)' })" -ForegroundColor Green
-Write-Host "  Logging:        VERBOSE (default)" -ForegroundColor Green
-Write-Host "  Remove access:  NO — admin stays as site owner (default)" -ForegroundColor Green
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "Press any key to connect and start discovery, or Ctrl+C to cancel..." -ForegroundColor Green
@@ -216,6 +252,8 @@ try {
         Connect-PnPOnline -Url $AdminUrl -Interactive -ClientId $ClientId -ErrorAction Stop
     }
     Write-Host "✓ Connected!" -ForegroundColor Green
+    # Extend CSOM request timeout to 10 minutes (default is 100 s) for large tenant discovery
+    try { (Get-PnPContext).RequestTimeout = 600000 } catch { }
 }
 catch {
     Write-Host "✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Green
@@ -226,12 +264,48 @@ catch {
     exit
 }
 
-# ========== RETRIEVE SharePoint SITES ==========
+# ========== CACHE DB INIT ==========
+Write-Host "[CACHE] Initializing delta-processing cache..." -ForegroundColor Green
+try {
+    Invoke-SqliteQuery -DataSource $DbPath -Query "PRAGMA journal_mode=WAL;" -ErrorAction Stop | Out-Null
+    Invoke-SqliteQuery -DataSource $DbPath -Query "CREATE TABLE IF NOT EXISTS ProcessedFiles (FileUrl TEXT PRIMARY KEY, SiteUrl TEXT NOT NULL, FileModified TEXT NOT NULL, CleanedAt TEXT NOT NULL);" -ErrorAction Stop | Out-Null
+    $cacheCount = (Invoke-SqliteQuery -DataSource $DbPath -Query "SELECT COUNT(*) AS n FROM ProcessedFiles" -ErrorAction Stop).n
+    Write-Host "  ✓ Cache ready — $cacheCount file(s) already recorded" -ForegroundColor Green
+    Write-Host "    $DbPath" -ForegroundColor Green
+}
+catch {
+    Write-Host "  ⚠ Cache unavailable: $($_.Exception.Message) — will process all files" -ForegroundColor Green
+    $DbPath = $null
+}
+Write-Host ""
+
+# ========== RETRIEVE SharePoint SITES ===========
 Write-Host "[DISCOVERY] Scanning for OneDrive sites..." -ForegroundColor Green
 Write-Host "(This may take a few minutes depending on tenant size)" -ForegroundColor Green
 
 try {
-    $AllSites = Get-PnPTenantSite -IncludeOneDriveSites -ErrorAction Stop
+    # -Paging fetches 300 sites per HTTP request instead of one giant blocking call,
+    # preventing the 100-second HttpClient timeout on large tenants.
+    # Retry up to 5 times on throttle / cancellation errors.
+    $SharePointSites = $null
+    $discoverAttempt = 0
+    $discoverMaxRetries = 5
+    while ($null -eq $SharePointSites) {
+        try {
+            $SharePointSites = Get-PnPTenantSite -IncludeOneDriveSites -Filter "Url -like '$MySiteHost/personal/'" -ErrorAction Stop
+        }
+        catch {
+            $discoverAttempt++
+            $errMsg = $_.Exception.Message + $_.Exception.InnerException.Message
+            $retryable = $errMsg -like '*throttl*' -or $errMsg -like '*429*' -or
+                         $errMsg -like '*canceled*' -or $errMsg -like '*timeout*' -or
+                         $errMsg -like '*timed out*'
+            if (-not $retryable -or $discoverAttempt -ge $discoverMaxRetries) { throw }
+            $delaySec = 15 * $discoverAttempt
+            Write-Host "  ⚠ Discovery attempt $discoverAttempt failed (throttled/timeout), retrying in $delaySec s..." -ForegroundColor Green
+            Start-Sleep -Seconds $delaySec
+        }
+    }
 }
 catch {
     Write-Host "✗ Failed to retrieve tenant sites!" -ForegroundColor Green
@@ -244,16 +318,18 @@ catch {
     Write-Host "  2. The certificate is not uploaded to the app" -ForegroundColor Green
     Write-Host "     → Azure Portal → App registrations → $AppName → Certificates & secrets" -ForegroundColor Green
     Write-Host "     → Upload SharePoint-Cleanup-Tool.cer" -ForegroundColor Green
+    Write-Host "  3. Persistent timeout after retries — tenant may be under heavy load" -ForegroundColor Green
+    Write-Host "     → Verify AdminUrl is correct: $AdminUrl" -ForegroundColor Green
+    Write-Host "     → Verify the my-site host: $MySiteHost" -ForegroundColor Green
+    Write-Host "     → Try re-running the script; discovery is retried automatically up to 5 times" -ForegroundColor Green
     exit
 }
 
-$SharePointSites = $AllSites | Where-Object { $_.Url -like "$MySiteHost/personal/*" }
 $Count = $SharePointSites.Count
 Write-Host "✓ Found $Count OneDrive site(s)" -ForegroundColor Green
 
 if ($Count -eq 0) {
-    Write-Host "✗ No OneDrive sites found." -ForegroundColor Green
-    Write-Host "  Retrieved $($AllSites.Count) total site(s) but none matched: $MySiteHost/personal/*" -ForegroundColor Green
+    Write-Host "✗ No OneDrive sites found matching: $MySiteHost/personal/*" -ForegroundColor Green
     exit
 }
 Write-Host ""
@@ -336,11 +412,7 @@ Write-Host ""
 
 # ========== PROCESSING LOOP ==========
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "              STARTING VERSION CLEANUP                    " -ForegroundColor Green
-Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host ""
-Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "   Parallel processing: $MaxThreads threads" -ForegroundColor Green
+Write-Host "   STARTING VERSION CLEANUP  —  $MaxThreads parallel threads" -ForegroundColor Green
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 
@@ -354,12 +426,35 @@ function Process-UserSite {
         [string]$TenantName,
         [string]$AdminUrl,
         [int]$ThreadId,
-        [hashtable]$SharedStatus = $null
+        [hashtable]$SharedStatus = $null,
+        [string]$DbPath = ""
     )
     # Inline status helper — no closure needed
     function Set-Status ([string]$msg, [int]$pct = 0, [bool]$done = $false, [int]$errors = 0) {
         if ($null -ne $SharedStatus) {
             $SharedStatus[$Owner] = @{ msg = $msg; pct = $pct; done = $done; errors = $errors }
+        }
+    }
+
+    # Retry wrapper: handles throttling (429) and HttpClient timeout cancellations
+    function Invoke-PnPWithRetry {
+        param([scriptblock]$ScriptBlock, [int]$MaxRetries = 5, [int]$BaseDelaySec = 12)
+        $attempt = 0
+        while ($true) {
+            try {
+                return & $ScriptBlock
+            }
+            catch {
+                $msg = $_.Exception.Message + $_.Exception.InnerException.Message
+                $retryable = $msg -like '*throttl*' -or $msg -like '*429*' -or
+                             $msg -like '*canceled*' -or $msg -like '*timeout*' -or
+                             $msg -like '*timed out*' -or $msg -like '*RequestTimeout*' -or
+                             $msg -like '*retry*'
+                $attempt++
+                if (-not $retryable -or $attempt -ge $MaxRetries) { throw }
+                $delay = $BaseDelaySec * $attempt   # 12 s, 24 s, 36 s …
+                Start-Sleep -Seconds $delay
+            }
         }
     }
     
@@ -386,9 +481,9 @@ function Process-UserSite {
                 $AdminConn = Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId `
                     -Tenant "$TenantName.onmicrosoft.com" -CertificatePath $CertPath `
                     -ReturnConnection -ErrorAction Stop
+                try { $AdminConn.Context.RequestTimeout = 600000 } catch { }
             }
             Set-PnPTenantSite -Url $Url -Owners @($AdminEmail) -Connection $AdminConn -ErrorAction SilentlyContinue | Out-Null
-            Start-Sleep -Seconds 2
         }
         catch { }
         Set-Status "Connecting..." -pct 0
@@ -400,24 +495,26 @@ function Process-UserSite {
             # Interactive fallback — only safe for single-threaded use
             $UserConn = Connect-PnPOnline -Url $Url -Interactive -ClientId $ClientId -ReturnConnection -ErrorAction Stop
         }
+        try { $UserConn.Context.RequestTimeout = 600000 } catch { }
         
         Set-Status "Finding document library..." -pct 0
         $DocumentLibrary = $null
         $PossibleNames = @("Documents", "Shared Documents", "Documenten", "Dokumenty", "Documentos")
-        
+
+        # Fetch all lists in a single API call to avoid multiple round-trips (and throttling under load)
+        $AllLists = Invoke-PnPWithRetry { Get-PnPList -Connection $UserConn -ErrorAction Stop }
+
+        # First: try well-known library names (in-memory match, no extra API calls)
         foreach ($LibName in $PossibleNames) {
-            try {
-                $TestLib = Get-PnPList -Identity $LibName -Connection $UserConn -ErrorAction SilentlyContinue
-                if ($TestLib) {
-                    $DocumentLibrary = $TestLib
-                    break
-                }
+            $Match = $AllLists | Where-Object { $_.Title -eq $LibName } | Select-Object -First 1
+            if ($Match) {
+                $DocumentLibrary = $Match
+                break
             }
-            catch { }
         }
-        
+
+        # Fallback: first visible document library (BaseTemplate 101)
         if (-not $DocumentLibrary) {
-            $AllLists = Get-PnPList -Connection $UserConn
             $DocumentLibrary = $AllLists | Where-Object { 
                 $_.BaseTemplate -eq 101 -and $_.Hidden -eq $false 
             } | Select-Object -First 1
@@ -430,25 +527,19 @@ function Process-UserSite {
         
         $LibraryName = $DocumentLibrary.Title
         
-        try {
-            Set-PnPList -Identity $LibraryName -EnableVersioning $true -Connection $UserConn -ErrorAction SilentlyContinue | Out-Null
-            Set-PnPList -Identity $LibraryName -MajorVersions 1 -Connection $UserConn -ErrorAction SilentlyContinue | Out-Null
-        }
-        catch { }
-        
         Set-Status "Scanning files..." -pct 0
         $AllFiles = @()
         try {
-            $AllFiles = Get-PnPListItem -List $LibraryName -PageSize 1000 -Connection $UserConn -Fields "FileLeafRef", "FileRef", "File_x0020_Size", "Modified" | 
+            $AllFiles = Invoke-PnPWithRetry { Get-PnPListItem -List $LibraryName -PageSize 1000 -Connection $UserConn -Fields "FileLeafRef", "FileRef", "Modified" -ErrorAction Stop } | 
             Where-Object { $_.FileSystemObjectType -eq "File" }
         }
         catch {
             try {
-                $AllFiles = Get-PnPListItem -List $LibraryName -PageSize 500 -Connection $UserConn | 
+                $AllFiles = Invoke-PnPWithRetry { Get-PnPListItem -List $LibraryName -PageSize 500 -Connection $UserConn -ErrorAction Stop } | 
                 Where-Object { $_.FileSystemObjectType -eq "File" }
             }
             catch {
-                $result.ErrorMessage = "Failed to scan library"
+                $result.ErrorMessage = "Failed to scan library: $($_.Exception.Message)"
                 return $result
             }
         }
@@ -461,7 +552,6 @@ function Process-UserSite {
             return $result
         }
         
-        $UserFilesWithVersions = 0
         $UserFilesSkipped = 0
         $ErrorCount = 0
         $TotalVersionsCount = 0
@@ -469,48 +559,66 @@ function Process-UserSite {
         
         foreach ($item in $AllFiles) {
             $fileNum++
-            $fileName = $item.FieldValues.FileLeafRef
-            $fileUrl = $item.FieldValues.FileRef
-            
+            $fileUrl         = $item.FieldValues.FileRef
+            $fileModified    = $item.FieldValues.Modified
+            $fileModifiedStr = if ($fileModified) { ([datetime]$fileModified).ToUniversalTime().ToString('o') } else { "" }
+
+            # Cache check — skip if already cleaned and file has not changed since
+            if ($DbPath -and $fileModifiedStr) {
+                try {
+                    $cached = Invoke-SqliteQuery -DataSource $DbPath `
+                        -Query "SELECT FileModified FROM ProcessedFiles WHERE FileUrl = @u" `
+                        -SqlParameters @{ u = $fileUrl } -ErrorAction SilentlyContinue
+                    if ($cached -and $cached.FileModified -and
+                        ([datetime]$cached.FileModified) -ge ([datetime]$fileModifiedStr)) {
+                        $UserFilesSkipped++
+                        continue
+                    }
+                }
+                catch { }
+            }
+
             try {
                 $pct = [int](($fileNum / $TotalFileCount) * 100)
                 $shortPath = $fileUrl -replace '^/personal/[^/]+/', '/'
                 Set-Status "$fileNum/$TotalFileCount $shortPath" -pct $pct
-                $versions = Get-PnPFileVersion -Url $fileUrl -Connection $UserConn -ErrorAction SilentlyContinue
-                $versionCount = if ($versions) { $versions.Count } else { 0 }
-                
-                if ($versionCount -gt 0) {
-                    $retryCount = 0
-                    $maxRetries = 3
-                    $success = $false
-                    
-                    while (-not $success -and $retryCount -lt $maxRetries) {
-                        try {
-                            Remove-PnPFileVersion -Url $fileUrl -All -Force -Connection $UserConn -ErrorAction Stop
-                            $success = $true
-                            $UserFilesWithVersions++
-                            $TotalVersionsCount += $versionCount
-                        }
-                        catch {
-                            $errorMsg = $_.Exception.Message
-                            if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*" -or $errorMsg -like "*not found*") {
-                                $success = $true
+                $retryCount = 0
+                $maxRetries = 3
+                $deleted = $false
+                $skipped = $false
+
+                while (-not $deleted -and -not $skipped -and $retryCount -lt $maxRetries) {
+                    try {
+                        Remove-PnPFileVersion -Url $fileUrl -All -Force -Connection $UserConn -ErrorAction Stop
+                        $deleted = $true
+                        $TotalVersionsCount++
+                        if ($DbPath -and $fileModifiedStr) {
+                            try {
+                                Invoke-SqliteQuery -DataSource $DbPath `
+                                    -Query "INSERT OR REPLACE INTO ProcessedFiles (FileUrl, SiteUrl, FileModified, CleanedAt) VALUES (@u, @s, @m, @c)" `
+                                    -SqlParameters @{ u = $fileUrl; s = $Url; m = $fileModifiedStr; c = (Get-Date -Format 'o') } `
+                                    -ErrorAction SilentlyContinue
                             }
-                            else {
-                                $retryCount++
-                                if ($retryCount -lt $maxRetries) {
-                                    Start-Sleep -Milliseconds 500
-                                }
-                            }
+                            catch { }
                         }
                     }
-                    
-                    if (-not $success) {
-                        $ErrorCount++
+                    catch {
+                        $errorMsg = $_.Exception.Message
+                        if ($errorMsg -like "*No file versions*" -or $errorMsg -like "*versions to delete*" -or $errorMsg -like "*not found*") {
+                            $skipped = $true
+                            $UserFilesSkipped++
+                        }
+                        else {
+                            $retryCount++
+                            if ($retryCount -lt $maxRetries) {
+                                Start-Sleep -Milliseconds 100
+                            }
+                        }
                     }
                 }
-                else {
-                    $UserFilesSkipped++
+
+                if (-not $deleted -and -not $skipped) {
+                    $ErrorCount++
                 }
             }
             catch {
@@ -524,7 +632,7 @@ function Process-UserSite {
             }
         }
         
-        Set-Status "Done | $TotalFileCount files | $TotalVersionsCount versions deleted | $ErrorCount errors" -pct 100 -done $true -errors $ErrorCount
+        Set-Status "Done | $TotalFileCount files | $TotalVersionsCount cleaned | $ErrorCount errors" -pct 100 -done $true -errors $ErrorCount
         $result.Success = $true
         $result.FilesProcessed = $TotalFileCount
         $result.VersionsDeleted = $TotalVersionsCount
@@ -568,12 +676,14 @@ foreach ($Site in $TargetSites) {
     Write-Host "  + $Owner" -ForegroundColor Green
 
     $powershell = [powershell]::Create().AddScript({
-            param($Url, $Owner, $AdminEmail, $ClientId, $CertPath, $TenantName, $AdminUrl, $ThreadId, $FuncDef, $SharedStatus)
+            param($Url, $Owner, $AdminEmail, $ClientId, $CertPath, $TenantName, $AdminUrl, $ThreadId, $FuncDef, $SharedStatus, $DbPath)
             # Ensure PnP module is available in this isolated runspace
-            Import-Module PnP.PowerShell -ErrorAction SilentlyContinue
+            $m = if (Get-Module -ListAvailable -Name PnP.PowerShell) { "PnP.PowerShell" } else { "SharePointPnPPowerShellOnline" }
+            Import-Module $m -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            Import-Module PSSQLite -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
             Set-Item -Path "Function:\Process-UserSite" -Value $FuncDef
-            Process-UserSite -Url $Url -Owner $Owner -AdminEmail $AdminEmail -ClientId $ClientId -CertPath $CertPath -TenantName $TenantName -AdminUrl $AdminUrl -ThreadId $ThreadId -SharedStatus $SharedStatus
-        }).AddParameter("Url", $Url).AddParameter("Owner", $Owner).AddParameter("AdminEmail", $AdminEmail).AddParameter("ClientId", $ClientId).AddParameter("CertPath", $CertPath).AddParameter("TenantName", $TenantName).AddParameter("AdminUrl", $AdminUrl).AddParameter("ThreadId", $UserNumber).AddParameter("FuncDef", $ProcessUserSiteFuncDef).AddParameter("SharedStatus", $statusTable)
+            Process-UserSite -Url $Url -Owner $Owner -AdminEmail $AdminEmail -ClientId $ClientId -CertPath $CertPath -TenantName $TenantName -AdminUrl $AdminUrl -ThreadId $ThreadId -SharedStatus $SharedStatus -DbPath $DbPath
+        }).AddParameter("Url", $Url).AddParameter("Owner", $Owner).AddParameter("AdminEmail", $AdminEmail).AddParameter("ClientId", $ClientId).AddParameter("CertPath", $CertPath).AddParameter("TenantName", $TenantName).AddParameter("AdminUrl", $AdminUrl).AddParameter("ThreadId", $UserNumber).AddParameter("FuncDef", $ProcessUserSiteFuncDef).AddParameter("SharedStatus", $statusTable).AddParameter("DbPath", $DbPath)
 
     $powershell.RunspacePool = $runspacePool
     $jobs.Add([PSCustomObject]@{
@@ -613,15 +723,28 @@ for ($i = 0; $i -lt $displayLines; $i++) { Write-Host "" }
 # Save the starting row (cursor is now below reserved area)
 $startRow = [Console]::CursorTop - $displayLines
 
+# Ensure the console buffer is tall enough to hold the entire live display area
+try {
+    $bufNeeded = $startRow + $displayLines + 5
+    if ($bufNeeded -gt [Console]::BufferHeight) { [Console]::BufferHeight = $bufNeeded }
+} catch { }
+
+# Helper: move cursor only if the row is within the valid buffer range
+function Safe-CursorRow ([int]$r) {
+    $max = [Console]::BufferHeight - 1
+    if ($r -lt 0) { $r = 0 }
+    if ($r -gt $max) { $r = $max }
+    [Console]::SetCursorPosition(0, $r)
+}
+
 while ($jobs.Count -gt 0) {
 
     $row = $startRow
     $spin = $spinChars[$spinIdx % 4]; $spinIdx++
-    $pct = if ($totalUsers -gt 0) { [int](($completed / $totalUsers) * 100) } else { 100 }
 
     # ── Overall status line ──────────────────────────────────────
-    [Console]::SetCursorPosition(0, $row)
-    $overallText = " $spin  $completed / $totalUsers complete  |  Files: $TotalFilesProcessed  |  Versions deleted: $TotalVersionsDeleted"
+    Safe-CursorRow $row
+    $overallText = " $spin  $completed / $totalUsers complete  |  Files: $TotalFilesProcessed  |  Files cleaned: $TotalVersionsDeleted"
     Write-Host "$E[2K$E[32m$overallText$E[0m" -NoNewline
     $row++
 
@@ -633,7 +756,7 @@ while ($jobs.Count -gt 0) {
         if ($stMsg -like '*Done*') { $stPct = 100 }
 
         # Line 1: blue username + green [status] — aligned ] + checkmark/X
-        [Console]::SetCursorPosition(0, $row)
+        Safe-CursorRow $row
         $padOwner = $site.Owner.PadRight($maxOwnerLen)
         $padMsg = $stMsg.PadRight($statusWidth).Substring(0, $statusWidth)
         $suffix = ""
@@ -645,7 +768,7 @@ while ($jobs.Count -gt 0) {
         $row++
 
         # Line 2: per-character gradient bar (red on left -> green on right)
-        [Console]::SetCursorPosition(0, $row)
+        Safe-CursorRow $row
         $uFilled = [int](($stPct / 100) * $barWidth)
         if ($uFilled -gt $barWidth) { $uFilled = $barWidth }
         if ($uFilled -lt 0) { $uFilled = 0 }
@@ -665,7 +788,7 @@ while ($jobs.Count -gt 0) {
 
     # ── Collect completed jobs ──────────────────────────────────────
     # Move cursor below the display area; recalculate startRow to survive console scrolling
-    [Console]::SetCursorPosition(0, $row)
+    Safe-CursorRow $row
     $startRow = $row - $displayLines
 
     foreach ($job in @($jobs)) {
@@ -733,7 +856,7 @@ if ($CompletedSites.Count -gt 0) {
     foreach ($site in $CompletedSites) {
         Write-Host "  User:      $($site.Owner)" -ForegroundColor Green
         Write-Host "  Files:     $($site.FilesProcessed)" -ForegroundColor Green
-        Write-Host "  Versions:  $($site.VersionsDeleted)" -ForegroundColor Green
+        Write-Host "  Cleaned:   $($site.VersionsDeleted)" -ForegroundColor Green
         Write-Host "  Skipped:   $($site.FilesSkipped)" -ForegroundColor Green
         Write-Host "  Errors:    $($site.Errors)" -ForegroundColor Green
         Write-Host "  ----------------------------------------" -ForegroundColor Green
@@ -741,7 +864,7 @@ if ($CompletedSites.Count -gt 0) {
     
     Write-Host ""
     Write-Host "  TOTAL FILES PROCESSED:    $TotalFilesProcessed" -ForegroundColor Green
-    Write-Host "  TOTAL VERSIONS DELETED:   $TotalVersionsDeleted" -ForegroundColor Green
+    Write-Host "  TOTAL FILES CLEANED:      $TotalVersionsDeleted" -ForegroundColor Green
     Write-Host ""
 }
 
@@ -751,7 +874,7 @@ Write-Host "                   ✓ JOB COMPLETE ✓                      " -Fore
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host "Users Targeted:      $($TargetSites.Count)" -ForegroundColor Green
 Write-Host "Files Processed:     $TotalFilesProcessed" -ForegroundColor Green
-Write-Host "Versions Deleted:    $TotalVersionsDeleted" -ForegroundColor Green
+Write-Host "Files Cleaned:       $TotalVersionsDeleted" -ForegroundColor Green
 Write-Host "Failed Sites:        $($FailedSites.Count)" -ForegroundColor $(if ($FailedSites.Count -gt 0) { "Red" } else { "Green" })
 Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Green
 

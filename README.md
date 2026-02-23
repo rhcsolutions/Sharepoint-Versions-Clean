@@ -4,7 +4,8 @@ Bulk-deletes file version history from OneDrive personal sites across a Microsof
 
 ## Features
 
-- **Parallel processing** — multiple users processed simultaneously via PowerShell runspaces (default: 10 threads, configurable with `-MaxThreads`)
+- **Delta processing** — local SQLite cache (`cleanup-cache.db`) records every cleaned file; subsequent runs skip files that haven't changed, processing only new or modified files
+- **Parallel processing** — multiple users processed simultaneously via PowerShell runspaces (default: 20 threads, configurable with `-MaxThreads`)
 - **Live ANSI dashboard** — in-place updating display with per-user status, per-character gradient progress bar (red to green), and overall counters
 - **Certificate authentication** — connects silently using a `.pfx` certificate, no browser popups
 - **Saved settings** — admin account, tenant, and app ID persisted to `config.json` for one-keypress repeat runs
@@ -18,7 +19,8 @@ Bulk-deletes file version history from OneDrive personal sites across a Microsof
 | Requirement | Details |
 | --- | --- |
 | PowerShell | 5.1 or higher |
-| PnP PowerShell | `Install-Module PnP.PowerShell` (v3.x recommended) |
+| PnP PowerShell | `Install-Module PnP.PowerShell` (any version; `SharePointPnPPowerShellOnline` also supported) |
+| PSSQLite | `Install-Module PSSQLite` (auto-installed on first run) |
 | Account role | SharePoint Administrator |
 | Certificate | `SharePoint-Cleanup-Tool.pfx` in the script folder |
 | App permissions | `AllSites.FullControl` (Delegated) + `Sites.FullControl.All` (Application) |
@@ -28,7 +30,7 @@ Bulk-deletes file version history from OneDrive personal sites across a Microsof
 ### 1. Install PnP PowerShell
 
 ```powershell
-Install-Module PnP.PowerShell -Scope CurrentUser
+Install-Module PnP.PowerShell -Scope CurrentUser -AllowClobber
 ```
 
 ### 2. Run the script
@@ -55,7 +57,7 @@ Settings are saved to `config.json` for next time.
 
 ### 4. Repeat runs
 
-```
+```text
   Saved settings found:
     Admin:    admin@contoso.onmicrosoft.com
     Tenant:   contoso.onmicrosoft.com
@@ -71,11 +73,11 @@ Press **Enter** to skip straight to user selection.
 
 During processing, the script shows a real-time dashboard that updates in-place:
 
-```
- /  3 / 10 complete  |  Files: 1245  |  Versions deleted: 3891
+```text
+ /  3 / 10 complete  |  Files: 1245  |  Files cleaned: 891
  user1@contoso.com  [42/500 /Documents/Reports/Q4/budget.xlsx                          ]
  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░__________________________________                8%
- user2@contoso.com  [Done | 800 files | 2100 versions deleted | 0 errors               ] V
+ user2@contoso.com  [Done | 800 files | 800 cleaned | 0 errors                         ] V
  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 100%
  user3@contoso.com  [Connecting...                                                      ]
  ___________________________________________________________________________________   0%
@@ -97,6 +99,7 @@ During processing, the script shows a real-time dashboard that updates in-place:
 | `SharePoint-Cleanup-Tool.pfx` | Certificate for app authentication |
 | `SharePoint-Cleanup-Tool.cer` | Public cert — upload to Azure AD app |
 | `config.json` | Saved settings (created on first run, gitignored) |
+| `cleanup-cache.db` | SQLite delta cache — tracks cleaned files (created on first run, gitignored) |
 
 ## App Registration
 
@@ -121,8 +124,10 @@ If automatic registration fails, enter an existing Client ID. Ensure the app has
 
 ## Processing Workflow
 
-```
-Startup > Load config.json > [Enter] reuse / [N] re-enter
+```text
+Startup > Module check (auto-installs PnP.PowerShell + PSSQLite if missing)
+   |
+Load config.json > [Enter] reuse / [N] re-enter
    |
 STEP 1: Admin email > tenant extracted
    |
@@ -131,6 +136,8 @@ STEP 2: Certificate check > App ID confirmed or created > admin consent
 STEP 3: Choose ALL or SPECIFIC users
    |
 Connect to SharePoint Admin Center (certificate auth)
+   |
+Cache DB init: open/create cleanup-cache.db (WAL mode)
    |
 Discovery: Get-PnPTenantSite > list OneDrive personal sites
    |
@@ -143,11 +150,10 @@ Parallel processing (runspace pool):
     - Grant admin access to OneDrive site
     - Connect to user site
     - Detect document library (multi-language)
-    - Set version limit to 1
     - Scan all files
-    - Delete all versions (retry up to 3x per file)
+    - Per file: check cache → skip if unchanged, else delete versions + write to cache
    |
-Final summary: files processed, versions deleted, failures
+Final summary: files processed, files cleaned, failures
 ```
 
 ## Troubleshooting
@@ -168,6 +174,15 @@ The app is missing `Sites.FullControl.All` Application permission:
 2. Add permission > SharePoint > Application > `Sites.FullControl.All`
 3. Grant admin consent
 
+### Discovery times out (HttpClient.Timeout 100 s)
+
+This happens on large tenants when the API returns too many sites. The script now passes a server-side URL filter (`-Filter "Url -like '...my.sharepoint.com/personal/'"`) so only OneDrive personal sites are fetched. If you still hit the timeout, your `AdminUrl` / tenant name may be wrong — verify with:
+
+```powershell
+Connect-PnPOnline -Url https://<tenant>-admin.sharepoint.com -Interactive
+Get-PnPTenantSite -IncludeOneDriveSites -Filter "Url -like 'https://<tenant>-my.sharepoint.com/personal/'" | Select-Object Url | Select-Object -First 5
+```
+
 ### Connection failed — certificate error
 
 - Verify `SharePoint-Cleanup-Tool.cer` is uploaded to the app in Azure Portal
@@ -179,6 +194,16 @@ The app is missing `Sites.FullControl.All` Application permission:
 - Admin consent may not be fully propagated — wait 2-5 minutes and retry
 - Verify the account has the **SharePoint Administrator** role
 
+### Reset the delta cache
+
+To force a full re-scan and re-clean of all files, delete the cache database:
+
+```powershell
+Remove-Item .\cleanup-cache.db
+```
+
+The file will be recreated on the next run.
+
 ### Switch to a different tenant
 
 Press **N** at the saved settings prompt to re-enter all values.
@@ -189,7 +214,8 @@ Press **N** at the saved settings prompt to re-enter all values.
 - Type **DELETE** exactly at the confirmation prompt to proceed
 - Admin access is kept on processed sites by default
 - Large libraries (100k+ files) automatically fall back to smaller page sizes
-- All terminal output is green (with cyan usernames) for consistent appearance
+- **Delta mode**: files already cleaned are skipped unless their `Modified` date has changed — re-run freely without redundant API calls
+- All terminal output is green; the live dashboard uses cyan for usernames and a red-to-green gradient bar
 
 ---
 
