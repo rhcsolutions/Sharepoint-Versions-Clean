@@ -1,6 +1,17 @@
-# Local config (contains saved Client ID)
+# Legacy single-tenant config (may still exist, keep it ignored)
 config.json
 
 # Certificates — never commit private keys
 *.pfx
 *.cer
+
+# Per-tenant credentials and caches (stored in tenants/ folder)
+tenants/*.json
+tenants/*.pfx
+tenants/*.cer
+tenants/*.db
+
+# SQLite delta-processing cache (old location)
+*.db
+*.db-shm
+*.db-wal

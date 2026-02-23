@@ -1,0 +1,6 @@
+# Tenant credentials are stored here as:
+#   {tenantName}.json   — AdminEmail, ClientId, TenantName
+#   {tenantName}.pfx    — certificate (private key — NEVER commit)
+#   {tenantName}.db     — delta-processing cache  (NEVER commit)
+#
+# All *.json / *.pfx / *.db in this folder are listed in .gitignore.

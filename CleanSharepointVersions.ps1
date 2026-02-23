@@ -83,45 +83,107 @@ if (-not (Get-Module -ListAvailable -Name PSSQLite)) {
 }
 Import-Module PSSQLite -Force -WarningAction SilentlyContinue -ErrorAction Stop
 
-# ========== LOAD SAVED CONFIG ==========
-$AppName = "SharePoint-Cleanup-Tool"
-$CertPath = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
-$ConfigPath = Join-Path $PSScriptRoot "config.json"
+# ========== MULTI-TENANT CONFIG ==========
+# Each tenant lives in:  tenants/{name}.json   — credentials
+#                        tenants/{name}.pfx    — certificate
+#                        tenants/{name}.db     — delta-processing cache
+
+$AppName    = "SharePoint-Cleanup-Tool"
+$TenantsDir = Join-Path $PSScriptRoot "tenants"
+if (-not (Test-Path $TenantsDir)) { New-Item -ItemType Directory -Path $TenantsDir | Out-Null }
+
+# Migrate legacy single-tenant files if present (one-time upgrade)
+$LegacyConfig = Join-Path $PSScriptRoot "config.json"
+$LegacyCert   = Join-Path $PSScriptRoot "SharePoint-Cleanup-Tool.pfx"
+$LegacyDb     = Join-Path $PSScriptRoot "cleanup-cache.db"
+if (Test-Path $LegacyConfig) {
+    try {
+        $lc = Get-Content $LegacyConfig -Raw | ConvertFrom-Json
+        if ($lc.TenantName) {
+            $destJson = Join-Path $TenantsDir "$($lc.TenantName).json"
+            $destPfx  = Join-Path $TenantsDir "$($lc.TenantName).pfx"
+            $destDb   = Join-Path $TenantsDir "$($lc.TenantName).db"
+            if (-not (Test-Path $destJson)) {
+                Copy-Item $LegacyConfig $destJson
+                Write-Host "  ✓ Migrated config  → tenants/$($lc.TenantName).json" -ForegroundColor DarkGray
+            }
+            if ((Test-Path $LegacyCert) -and -not (Test-Path $destPfx)) {
+                Copy-Item $LegacyCert $destPfx
+                Write-Host "  ✓ Migrated cert    → tenants/$($lc.TenantName).pfx" -ForegroundColor DarkGray
+            }
+            if ((Test-Path $LegacyDb) -and -not (Test-Path $destDb)) {
+                Copy-Item $LegacyDb $destDb
+                Write-Host "  ✓ Migrated cache   → tenants/$($lc.TenantName).db" -ForegroundColor DarkGray
+            }
+        }
+    } catch {}
+}
+
+# Discover saved tenants
+$KnownTenants = @(Get-ChildItem -Path $TenantsDir -Filter "*.json" -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        try {
+            $data = Get-Content $_.FullName -Raw | ConvertFrom-Json
+            [PSCustomObject]@{
+                Name       = $_.BaseName
+                AdminEmail = $data.AdminEmail
+                ClientId   = $data.ClientId
+                TenantName = $data.TenantName
+                HasCert    = Test-Path (Join-Path $TenantsDir "$($_.BaseName).pfx")
+                ConfigFile = $_.FullName
+            }
+        } catch { $null }
+    } | Where-Object { $_ })
+
 $AdminEmail = ""
 $TenantName = ""
-$ClientId = ""
-$DbPath   = Join-Path $PSScriptRoot "cleanup-cache.db"
+$ClientId   = ""
+$CertPath   = ""
+$ConfigPath = ""
+$DbPath     = ""
 
-if (Test-Path $ConfigPath) {
-    try {
-        $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-        $AdminEmail = $Config.AdminEmail
-        $TenantName = $Config.TenantName
-        $ClientId = $Config.ClientId
+# ========== TENANT SELECTION ==========
+if ($KnownTenants.Count -gt 0) {
+    Write-Host "  Known tenants:" -ForegroundColor Green
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor Green
+    for ($ti = 0; $ti -lt $KnownTenants.Count; $ti++) {
+        $t = $KnownTenants[$ti]
+        $certMark = if ($t.HasCert) { "cert ✓" } else { "cert ✗" }
+        Write-Host ("  [{0}]  {1,-20}  {2}  |  {3}" -f ($ti+1), $t.Name, $certMark, $t.AdminEmail) -ForegroundColor Green
     }
-    catch {}
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor Green
+    Write-Host "  [N]  Add new tenant" -ForegroundColor Green
+    Write-Host ""
+    $tenantChoice = Read-Host "  Select tenant number or [N]"
+    Write-Host ""
+
+    if ($tenantChoice -match '^\d+$') {
+        $idx = [int]$tenantChoice - 1
+        if ($idx -ge 0 -and $idx -lt $KnownTenants.Count) {
+            $chosen = $KnownTenants[$idx]
+            $AdminEmail = $chosen.AdminEmail
+            $TenantName = $chosen.TenantName
+            $ClientId   = $chosen.ClientId
+            $CertPath   = Join-Path $TenantsDir "$($chosen.Name).pfx"
+            $ConfigPath = $chosen.ConfigFile
+            $DbPath     = Join-Path $TenantsDir "$($chosen.Name).db"
+            Write-Host "  ✓ Using tenant: $TenantName.onmicrosoft.com" -ForegroundColor Green
+            Write-Host "    Admin:  $AdminEmail" -ForegroundColor Green
+            Write-Host "    App ID: $ClientId" -ForegroundColor Green
+            if (Test-Path $CertPath) {
+                Write-Host "    Cert:   tenants/$($chosen.Name).pfx  ✓" -ForegroundColor Green
+            } else {
+                Write-Host "    Cert:   ⚠ not found — will use browser login" -ForegroundColor Yellow
+            }
+            Write-Host ""
+        } else {
+            Write-Host "  ✗ Invalid selection." -ForegroundColor Red; exit
+        }
+    }
+    # else fall through to new-tenant flow below
 }
 
-# ========== SAVED SETTINGS SHORTCUT ==========
-if (-not [string]::IsNullOrWhiteSpace($AdminEmail) -and
-    -not [string]::IsNullOrWhiteSpace($TenantName) -and
-    -not [string]::IsNullOrWhiteSpace($ClientId)) {
-
-    Write-Host "  Saved settings found:" -ForegroundColor Green
-    Write-Host "    Admin:    $AdminEmail" -ForegroundColor Green
-    Write-Host "    Tenant:   $TenantName.onmicrosoft.com" -ForegroundColor Green
-    Write-Host "    App ID:   $ClientId" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  [Enter] Use saved settings" -ForegroundColor Green
-    Write-Host "  [N]     Enter new settings (different tenant / new app)" -ForegroundColor Green
-    $SavedChoice = Read-Host "  Choice"
-    if ($SavedChoice -eq 'N' -or $SavedChoice -eq 'n') {
-        $AdminEmail = ""; $TenantName = ""; $ClientId = ""
-    }
-    Write-Host ""
-}
-
-# ========== STEP 1: ADMIN ACCOUNT ==========
+# ========== STEP 1: ADMIN ACCOUNT (new tenant) ==========
 if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
     Write-Host "[STEP 1] Your SharePoint Administrator Account" -ForegroundColor Green
     Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Green
@@ -145,19 +207,29 @@ if ([string]::IsNullOrWhiteSpace($AdminEmail)) {
         exit
     }
 
+    $CertPath   = Join-Path $TenantsDir "$TenantName.pfx"
+    $ConfigPath = Join-Path $TenantsDir "$TenantName.json"
+    $DbPath     = Join-Path $TenantsDir "$TenantName.db"
+
     Write-Host "✓ Admin account:  $AdminEmail" -ForegroundColor Green
     Write-Host "✓ Tenant:         $TenantName.onmicrosoft.com" -ForegroundColor Green
+    Write-Host "✓ Config file:    tenants/$TenantName.json" -ForegroundColor Green
+    Write-Host "✓ Certificate:    tenants/$TenantName.pfx" -ForegroundColor Green
     Write-Host ""
 }
 
+# Ensure paths are set (may have been selected above without CertPath override)
+if (-not $CertPath)   { $CertPath   = Join-Path $TenantsDir "$TenantName.pfx" }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $TenantsDir "$TenantName.json" }
+if (-not $DbPath)     { $DbPath     = Join-Path $TenantsDir "$TenantName.db" }
+
 # ========== STEP 2: APP REGISTRATION ==========
-# Check certificate
 if (Test-Path $CertPath) {
-    Write-Host "  ✓ Certificate found: SharePoint-Cleanup-Tool.pfx" -ForegroundColor Green
+    Write-Host "  ✓ Certificate found: tenants/$TenantName.pfx" -ForegroundColor Green
 }
 else {
-    Write-Host "  ⚠ Certificate not found at: $CertPath" -ForegroundColor Green
-    Write-Host "    Will fall back to interactive browser login." -ForegroundColor Green
+    Write-Host "  ⚠ Certificate not found: tenants/$TenantName.pfx" -ForegroundColor Yellow
+    Write-Host "    Place the .pfx file there to enable unattended auth, or browser login will be used." -ForegroundColor Yellow
 }
 
 if (-not [string]::IsNullOrWhiteSpace($ClientId)) {
@@ -180,6 +252,7 @@ if ([string]::IsNullOrWhiteSpace($ClientId)) {
             -ErrorAction Stop
         $ClientId = $AppRegistration.'AzureAppId/ClientId'
         Write-Host "  ✓ App created! Client ID: $ClientId" -ForegroundColor Green
+        Write-Host "  ✓ Certificate saved: tenants/$TenantName.pfx" -ForegroundColor Green
         Write-Host ""
         Write-Host "  ⚠ Grant admin consent now (opening browser)..." -ForegroundColor Green
         Start-Process "https://login.microsoftonline.com/$TenantName.onmicrosoft.com/adminconsent?client_id=$ClientId"
@@ -200,10 +273,10 @@ if ([string]::IsNullOrWhiteSpace($ClientId)) {
     }
 }
 
-# Save all settings for next run
+# Save to tenant-named config file
 @{ AdminEmail = $AdminEmail; TenantName = $TenantName; ClientId = $ClientId } |
-ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
-Write-Host "✓ App ID: $ClientId" -ForegroundColor Green
+    ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
+Write-Host "✓ Config saved: tenants/$TenantName.json" -ForegroundColor Green
 Write-Host ""
 
 # ========== STEP 3: TARGET USERS ==========
@@ -407,9 +480,9 @@ function Process-UserSite {
         [string]$DbPath = ""
     )
     # Inline status helper — no closure needed
-    function Set-Status ([string]$msg, [int]$pct = 0, [bool]$done = $false, [int]$errors = 0) {
+    function Set-Status ([string]$msg, [int]$pct = 0, [bool]$done = $false, [int]$errors = 0, [string]$versioning = "") {
         if ($null -ne $SharedStatus) {
-            $SharedStatus[$Owner] = @{ msg = $msg; pct = $pct; done = $done; errors = $errors }
+            $SharedStatus[$Owner] = @{ msg = $msg; pct = $pct; done = $done; errors = $errors; versioning = $versioning }
         }
     }
 
@@ -514,7 +587,13 @@ function Process-UserSite {
         $result.MinorVersionsEnabled = $DocumentLibrary.EnableMinorVersions
         $result.MinorVersionLimit    = $DocumentLibrary.MajorWithMinorVersionsLimit
 
-        Set-Status "Scanning files..." -pct 0
+        # Build a compact versioning tag for the live dashboard
+        $verTag = if ($DocumentLibrary.EnableVersioning) {
+            $minPart = if ($DocumentLibrary.EnableMinorVersions) { "+min:$($DocumentLibrary.MajorWithMinorVersionsLimit)" } else { "" }
+            "Ver:ON maj:$($DocumentLibrary.MajorVersionLimit)$minPart"
+        } else { "Ver:OFF" }
+
+        Set-Status "Scanning files..." -pct 0 -versioning $verTag
         $AllFiles = @()
         try {
             $AllFiles = Invoke-PnPWithRetry { Get-PnPListItem -List $LibraryName -PageSize 1000 -Connection $UserConn -Fields "FileLeafRef", "FileRef", "Modified" -ErrorAction Stop } | 
@@ -568,7 +647,7 @@ function Process-UserSite {
             try {
                 $pct = [int](($fileNum / $TotalFileCount) * 100)
                 $shortPath = $fileUrl -replace '^/personal/[^/]+/', '/'
-                Set-Status "$fileNum/$TotalFileCount $shortPath" -pct $pct
+                Set-Status "$fileNum/$TotalFileCount $shortPath" -pct $pct -versioning $verTag
                 $retryCount = 0
                 $maxRetries = 3
                 $deleted = $false
@@ -619,7 +698,7 @@ function Process-UserSite {
             }
         }
         
-        Set-Status "Done | $TotalFileCount files | $TotalVersionsCount cleaned | $ErrorCount errors" -pct 100 -done $true -errors $ErrorCount
+        Set-Status "Done | $TotalFileCount files | $TotalVersionsCount cleaned | $ErrorCount errors" -pct 100 -done $true -errors $ErrorCount -versioning $verTag
         $result.Success = $true
         $result.FilesProcessed = $TotalFileCount
         $result.VersionsDeleted = $TotalVersionsCount
@@ -723,12 +802,15 @@ while ($jobs.Count -gt 0) {
 
     # ── Per-user: 2 lines each ──────────────────────────────────
     foreach ($site in $TargetSites) {
-        $stObj = if ($statusTable.ContainsKey($site.Owner)) { $statusTable[$site.Owner] } else { @{ msg = "Queued"; pct = 0; done = $false; errors = 0 } }
-        if ($stObj -is [string]) { $stMsg = $stObj; $stPct = 0; $isDone = $false; $errCount = 0 }
-        else { $stMsg = $stObj.msg; $stPct = $stObj.pct; $isDone = $stObj.done; $errCount = $stObj.errors }
+        $stObj = if ($statusTable.ContainsKey($site.Owner)) { $statusTable[$site.Owner] } else { @{ msg = "Queued"; pct = 0; done = $false; errors = 0; versioning = "" } }
+        if ($stObj -is [string]) { $stMsg = $stObj; $stPct = 0; $isDone = $false; $errCount = 0; $stVer = "" }
+        else { $stMsg = $stObj.msg; $stPct = $stObj.pct; $isDone = $stObj.done; $errCount = $stObj.errors; $stVer = $stObj.versioning }
         if ($stMsg -like '*Done*') { $stPct = 100 }
 
-        # Line 1: blue username + green [status] — aligned ] + checkmark/X
+        # Build versioning badge (cyan, compact) — only when known
+        $verBadge = if ($stVer) { " $E[33m[$stVer]$E[0m" } else { "" }
+
+        # Line 1: blue username + green [status] + versioning badge + checkmark/X
         [Console]::SetCursorPosition(0, $row)
         $padOwner = $site.Owner.PadRight($maxOwnerLen)
         $padMsg = $stMsg.PadRight($statusWidth).Substring(0, $statusWidth)
@@ -737,7 +819,7 @@ while ($jobs.Count -gt 0) {
             if ($errCount -eq 0) { $suffix = " $E[32mV$E[0m" }
             else { $suffix = " $E[31mX$E[0m" }
         }
-        Write-Host "$E[2K $E[36m$padOwner$E[0m $E[32m[$padMsg]$E[0m$suffix" -NoNewline
+        Write-Host "$E[2K $E[36m$padOwner$E[0m $E[32m[$padMsg]$E[0m$verBadge$suffix" -NoNewline
         $row++
 
         # Line 2: per-character gradient bar (red on left -> green on right)
