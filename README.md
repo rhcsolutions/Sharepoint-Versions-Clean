@@ -5,8 +5,9 @@ Bulk-deletes file version history from OneDrive personal sites across a Microsof
 ## Features
 
 - **Delta processing** — local SQLite cache (`cleanup-cache.db`) records every cleaned file; subsequent runs skip files that haven't changed, processing only new or modified files
-- **Parallel processing** — multiple users processed simultaneously via PowerShell runspaces (default: 20 threads, configurable with `-MaxThreads`)
+- **Parallel processing** — multiple users processed simultaneously via PowerShell runspaces (default: 5 threads, configurable with `-MaxThreads`)
 - **Live ANSI dashboard** — in-place updating display with per-user status, per-character gradient progress bar (red to green), and overall counters
+- **Versioning info** — after processing, shows each account's current document library versioning settings (enabled/disabled, major version limit, minor versions)
 - **Certificate authentication** — connects silently using a `.pfx` certificate, no browser popups
 - **Saved settings** — admin account, tenant, and app ID persisted to `config.json` for one-keypress repeat runs
 - **Smart app registration** — creates Azure AD app with required permissions and certificate, or reuses existing
@@ -42,7 +43,7 @@ Install-Module PnP.PowerShell -Scope CurrentUser -AllowClobber
 Custom thread count:
 
 ```powershell
-.\CleanSharepointVersions.ps1 -MaxThreads 20
+.\CleanSharepointVersions.ps1 -MaxThreads 10
 ```
 
 ### 3. First run
@@ -74,13 +75,13 @@ Press **Enter** to skip straight to user selection.
 During processing, the script shows a real-time dashboard that updates in-place:
 
 ```text
- /  3 / 10 complete  |  Files: 1245  |  Files cleaned: 891
- user1@contoso.com  [42/500 /Documents/Reports/Q4/budget.xlsx                          ]
- ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░__________________________________                8%
- user2@contoso.com  [Done | 800 files | 800 cleaned | 0 errors                         ] V
- ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 100%
- user3@contoso.com  [Connecting...                                                      ]
- ___________________________________________________________________________________   0%
+ /  3 / 5 complete  |  Files: 1245  |  Files cleaned: 891
+ user1@contoso.com  [42/500 /Documents/Reports/Q4/budget.xlsx       ]
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░__________________________________  8%
+ user2@contoso.com  [Done | 800 files | 800 cleaned | 0 errors      ] V
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 100%
+ user3@contoso.com  [Connecting...                                   ]
+ ___________________________________________________________________   0%
 ```
 
 - **Usernames** in cyan, **status** in green with aligned brackets
@@ -88,7 +89,25 @@ During processing, the script shows a real-time dashboard that updates in-place:
 - `░` = filled (progress), `_` = unfilled (remaining)
 - **V** = completed without errors, **X** = completed with errors
 - File paths shown from library root (`/Documents/...`) without the `/personal/username/` prefix
-- 200-character wide display
+- Display width adapts to the actual console window width
+
+## Final Summary
+
+After all users are processed, the summary shows per-account versioning settings alongside cleanup stats:
+
+```text
+  User:        user1@contoso.com
+  Versioning:  Enabled  (Major: 500 kept | Minor: 0 kept)
+  Files:       800
+  Cleaned:     800
+  Skipped:     0
+  Errors:      0
+```
+
+Versioning line can show:
+- `Enabled  (Major: N kept)` — major versioning on, no minor versions
+- `Enabled  (Major: N kept | Minor: N kept)` — both major and minor versioning on
+- `Disabled` — versioning turned off on the library
 
 ## Files
 
@@ -139,21 +158,22 @@ Connect to SharePoint Admin Center (certificate auth)
    |
 Cache DB init: open/create cleanup-cache.db (WAL mode)
    |
-Discovery: Get-PnPTenantSite > list OneDrive personal sites
+Discovery: Get-PnPTenantSite -IncludeOneDriveSites > list OneDrive personal sites
    |
 User selection (if SPECIFIC): pick from numbered list
    |
 Confirmation: type DELETE to proceed
    |
-Parallel processing (runspace pool):
+Parallel processing (runspace pool, default 5 threads):
   Per user:
     - Grant admin access to OneDrive site
     - Connect to user site
     - Detect document library (multi-language)
+    - Read versioning settings (EnableVersioning, MajorVersionLimit, MinorVersions)
     - Scan all files
     - Per file: check cache → skip if unchanged, else delete versions + write to cache
    |
-Final summary: files processed, files cleaned, failures
+Final summary: per-user versioning info, files processed, files cleaned, failures
 ```
 
 ## Troubleshooting
@@ -173,15 +193,6 @@ The app is missing `Sites.FullControl.All` Application permission:
 1. Azure Portal > App registrations > `SharePoint-Cleanup-Tool` > API permissions
 2. Add permission > SharePoint > Application > `Sites.FullControl.All`
 3. Grant admin consent
-
-### Discovery times out (HttpClient.Timeout 100 s)
-
-This happens on large tenants when the API returns too many sites. The script now passes a server-side URL filter (`-Filter "Url -like '...my.sharepoint.com/personal/'"`) so only OneDrive personal sites are fetched. If you still hit the timeout, your `AdminUrl` / tenant name may be wrong — verify with:
-
-```powershell
-Connect-PnPOnline -Url https://<tenant>-admin.sharepoint.com -Interactive
-Get-PnPTenantSite -IncludeOneDriveSites -Filter "Url -like 'https://<tenant>-my.sharepoint.com/personal/'" | Select-Object Url | Select-Object -First 5
-```
 
 ### Connection failed — certificate error
 
